@@ -52,17 +52,20 @@ if st.button("🚀 開始分析與生成", type="primary"):
                 st.success("✅ 處理完成！")
                 st.write(f"已識別模板分頁：{', '.join(sheet_names)}")
                 
-                # 將處理好的檔案轉為可下載格式
+            # 取得原檔案的名稱與格式，避免副檔名衝突
+                original_filename = uploaded_template.name
+
+            # 將處理好的檔案轉為可下載格式
                 output = io.BytesIO()
                 uploaded_template.seek(0)
                 output.write(uploaded_template.read())
-                
+
+# 讓下載出來的檔案，動態跟隨原本的副檔名
                 st.download_button(
                     label="📥 下載完成的結案報告",
                     data=output.getvalue(),
-                    file_name="自動產出_結案表格.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    file_name=f"自動產出_{original_filename}", 
+                    mime="application/octet-stream"
                 )
-
             except Exception as e:
                 st.error(f"處理過程中發生錯誤：{e}")
