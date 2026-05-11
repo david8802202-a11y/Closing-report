@@ -43,29 +43,55 @@ def is_main_data_row(row):
 
 
 # 主軸縮寫對照(PDF 中主軸欄位常被切成單字)
+# 由於不同專案可能有不同主軸類型,擴充常見對照;未列出的縮寫會用「文字解析」自動補
 主軸縮寫對照 = {
     "自": "自品置入",
     "需": "需求置入",
     "圖": "圖書/閱讀",
     "會": "會員/品牌",
     "百": "百貨",
-    "競": "競品置入",
+    "競": "競品置入",  # 或「競品議題置入」
     "全": "全域置入",
     "社": "社團置入",
+    "消": "消費者需求置入",
+    "情": "情境話題",
+    "產": "產品話題",
+    "話": "話題",
 }
 
 # 站版前綴關鍵字 — 用來辨識一行是否以「站版」開頭
 站版前綴 = ["Threads", "PTT", "Facebook", "Dcard", "Mobile01", "eyny", "Plurk",
              "BabyHome", "FG", "伊莉", "狄卡", "批踢踢", "FashionGuide"]
 
-# 行尾「主軸縮寫 + 日期前半 + 9 個數字」的特徵
+# 行尾「任意單一中文字 + 日期前半 + 9 個數字」的通用特徵
+# 這樣就不必預先列出所有可能的主軸縮寫
 ROW_PATTERN = re.compile(
-    r'(自|需|圖|會|百|競|全|社)\s+'                                # 主軸縮寫
+    r'([\u4e00-\u9fff])\s+'                                        # 主軸縮寫(任意單字)
     r'\d{4}-\s+'                                                   # 日期 yyyy-
     r'(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+'                            # 發文 回應 聲量 正向
     r'(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)'                       # 正面 負面 議題 產品 複合
     r'\s*$', re.MULTILINE
 )
+
+
+def get_main_category_from_pdf(pdf_path):
+    """從 PDF 第 3 頁的「操作主軸」表抽出實際主軸全名,建立縮寫到全名的對應"""
+    extracted = {}
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            for table in page.extract_tables():
+                if not table:
+                    continue
+                head = [normalize(c) for c in table[0]] if table[0] else []
+                # 「操作主軸」表的特徵:第一列 ['類型', '累計']
+                if "類型" in head and "累計" in head:
+                    for row in table[1:]:
+                        if len(row) >= 2 and row[0]:
+                            name = normalize(row[0])
+                            if name and name != "合計":
+                                # 取第一個字當縮寫
+                                extracted[name[0]] = name
+    return extracted
 
 
 def extract_main_table_via_text(pdf_path):
@@ -75,6 +101,11 @@ def extract_main_table_via_text(pdf_path):
         for page in pdf.pages:
             page_text = page.extract_text() or ""
             full_text += unicodedata.normalize('NFKC', page_text) + "\n"
+    
+    # 先嘗試從 PDF 第 3 頁「操作主軸」表抓主軸全名(動態對照)
+    dynamic_mapping = get_main_category_from_pdf(pdf_path)
+    # 結合內建對照 + 動態對照(動態優先)
+    mapping = {**主軸縮寫對照, **dynamic_mapping}
     
     rows = []
     for m in ROW_PATTERN.finditer(full_text):
@@ -90,10 +121,13 @@ def extract_main_table_via_text(pdf_path):
         if not has_prefix:
             continue
         
+        # 對應主軸全名(找不到就用縮寫本身)
+        主軸全名 = mapping.get(主軸縮寫, 主軸縮寫)
+        
         rows.append({
             "站版": line_part,
-            "標題": "",  # 文字解析時站版+標題混在一起,標題可選
-            "主軸": 主軸縮寫對照[主軸縮寫],
+            "標題": "",
+            "主軸": 主軸全名,
             "專案發文量": nums[0],
             "網友回應量": nums[1],
             "討論聲量總數": nums[2],
