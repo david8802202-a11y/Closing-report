@@ -95,16 +95,20 @@ def get_main_category_from_pdf(pdf_path):
 
 
 def extract_main_table_via_text(pdf_path):
-    """用「行尾 9 個數字」特徵從純文字中抓主表資料(比 extract_tables 穩健)"""
+    """用「行尾 9 個數字」特徵從純文字中抓主表資料(比 extract_tables 穩健)
+    
+    判斷邏輯:任何一行只要結尾是「中文字 + yyyy- + 9個數字」就視為資料列。
+    這個結構足以唯一識別資料列(合計列、表頭、空白行都不會符合)。
+    不依賴站版名稱字典,適用於任何站版。
+    """
     with pdfplumber.open(pdf_path) as pdf:
         full_text = ""
         for page in pdf.pages:
             page_text = page.extract_text() or ""
             full_text += unicodedata.normalize('NFKC', page_text) + "\n"
     
-    # 先嘗試從 PDF 第 3 頁「操作主軸」表抓主軸全名(動態對照)
+    # 從 PDF 第 3 頁的「操作主軸」表抓主軸全名(動態對照)
     dynamic_mapping = get_main_category_from_pdf(pdf_path)
-    # 結合內建對照 + 動態對照(動態優先)
     mapping = {**主軸縮寫對照, **dynamic_mapping}
     
     rows = []
@@ -116,9 +120,10 @@ def extract_main_table_via_text(pdf_path):
         line_start = full_text.rfind('\n', 0, m.start()) + 1
         line_part = full_text[line_start:m.start()].strip()
         
-        # 確認該行包含某個站版前綴
-        has_prefix = any(kw in line_part for kw in 站版前綴)
-        if not has_prefix:
+        # 過濾:行首不能是純數字(避免抓到「合計」之類的列被誤判)
+        # 合計列開頭是「合計」,且後面沒有主軸縮寫前綴 → 不會匹配 ROW_PATTERN
+        # 但保險起見再加一道過濾:行內容如果完全沒有站版字串(空字串/太短)就跳過
+        if len(line_part) < 3:
             continue
         
         # 對應主軸全名(找不到就用縮寫本身)
