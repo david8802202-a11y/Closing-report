@@ -283,7 +283,92 @@ def calculate_all(main_data, post_types):
     return result
 
 
-# ==================== 填充模板 ====================
+# ==================== 月報表填充邏輯 ====================
+
+def detect_template_type(wb):
+    """偵測模板類型:'monthly' (月報表) 或 'closure' (結案表) 或 'unknown'"""
+    sheet_names = wb.sheetnames
+    if "網友回應摘要+操作數據" in sheet_names and "版面佔比" in sheet_names:
+        return "monthly"
+    if "篇數" in sheet_names and "KPI" in sheet_names:
+        return "closure"
+    return "unknown"
+
+
+def categorize_station_monthly(stb):
+    """月報表的站版分類:PTT / DCARD / THREAD / 其他版面"""
+    s = normalize(stb)
+    if "PTT" in s.upper():
+        return "PTT"
+    if "Dcard" in s or "狄卡" in s:
+        return "DCARD"
+    if "Threads" in s:
+        return "THREAD"
+    return "其他版面"
+
+
+def fill_monthly_template(template_path, main_data, post_types):
+    """填入月報表模板"""
+    wb = load_workbook(template_path)
+    
+    # ===== 計算 =====
+    total_post = sum(r["專案發文量"] for r in main_data)
+    total_reply = sum(r["網友回應量"] for r in main_data)
+    total_volume = sum(r["討論聲量總數"] for r in main_data)
+    sum_pos = sum(r["正面討論"] for r in main_data)
+    sum_neg = sum(r["負面討論"] for r in main_data)
+    sum_topic = sum(r["議題討論"] for r in main_data)
+    sum_prod = sum(r["產品討論"] for r in main_data)
+    sum_combo = sum(r["複合討論"] for r in main_data)
+    
+    # 分母 = 5 類討論加總(等於網友回應量合計)
+    denominator = sum_pos + sum_neg + sum_topic + sum_prod + sum_combo
+    
+    def pct(numerator):
+        if denominator == 0:
+            return 0.0
+        return round(numerator / denominator * 100, 1)
+    
+    # ----- 頁簽 1:網友回應摘要+操作數據 -----
+    ws1 = wb["網友回應摘要+操作數據"]
+    
+    # C6 = 專案總發文量 + 文案類型明細
+    type_detail_parts = []
+    for tname, count in post_types.items():
+        type_detail_parts.append(f"{tname}{count}")
+    if type_detail_parts:
+        type_detail_str = "/".join(type_detail_parts)
+        ws1["C6"] = f"{total_post}篇\n【{type_detail_str}】"
+    else:
+        ws1["C6"] = f"{total_post}篇"
+    
+    ws1["C7"] = f"{total_reply}篇"
+    ws1["C8"] = f"{total_volume}篇"
+    ws1["C9"] = f"{pct(sum_pos)}% / {sum_pos}篇"
+    ws1["C10"] = f"{pct(sum_neg)}% / {sum_neg}篇"
+    ws1["C11"] = f"{pct(sum_combo)}% / {sum_combo}篇"
+    ws1["C12"] = f"{pct(sum_prod)}% / {sum_prod}篇"
+    ws1["C13"] = f"{pct(sum_topic)}% / {sum_topic}篇"
+    
+    # ----- 頁簽 2:版面佔比 -----
+    ws2 = wb["版面佔比"]
+    # 模板已有的:B10 PTT / B11 DCARD / B12 THREAD / B13 其他版面
+    cat_reply_sum = {"PTT": 0, "DCARD": 0, "THREAD": 0, "其他版面": 0}
+    for r in main_data:
+        cat = categorize_station_monthly(r["站版"])
+        cat_reply_sum[cat] += r["網友回應量"]
+    
+    ws2["C10"] = cat_reply_sum["PTT"]
+    ws2["C11"] = cat_reply_sum["DCARD"]
+    ws2["C12"] = cat_reply_sum["THREAD"]
+    ws2["C13"] = cat_reply_sum["其他版面"]
+    
+    # ----- 頁簽 3「總覽整理」:不處理 -----
+    
+    output = BytesIO()
+    wb.save(output)
+    return output.getvalue()
+
 
 def fill_template(template_path, calc_result):
     """把計算結果填入模板,回傳填好的 xlsx bytes"""
@@ -402,36 +487,197 @@ def convert_xls_to_xlsx(xls_bytes):
             return f.read()
 
 
+# ==================== 預覽渲染輔助函式 ====================
+
+def _render_closure_preview(result, main_data, post_types):
+    """渲染結案表預覽(4 個 tab)"""
+    tab1, tab2, tab3, tab4 = st.tabs(["📑 篇數", "📈 KPI", "📊 網友回應分布", "📂 原始資料"])
+    
+    with tab1:
+        st.write("**將填入工作表「篇數」**")
+        篇數 = result["篇數"]
+        cols = st.columns(5)
+        for i, (k, v) in enumerate(篇數.items()):
+            cols[i % 5].metric(k, v)
+        st.caption(f"📍 PDF 中抓到的文案類型:{', '.join(post_types.keys()) if post_types else '(無)'}")
+    
+    with tab2:
+        st.write("**將填入工作表「KPI」**")
+        kpi = result["KPI"]
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("網友回應數", f"{kpi['網友回應數']} 篇")
+        c2.metric("議題曝光數", f"{kpi['議題曝光數']} 串")
+        c3.metric("內文指名度", "(手動填)", delta="留空")
+        c4.metric("好評增加數", f"{kpi['好評增加數']} 篇")
+        
+        with st.expander("📐 計算明細"):
+            st.write(f"- **網友回應數** = 網友回應量加總 = **{kpi['網友回應數']}**")
+            non_p = [r['主軸'] for r in main_data if "置入" not in r['主軸']]
+            st.write(f"- **議題曝光數** = 主軸非「置入」的列數 = **{kpi['議題曝光數']}**")
+            st.write(f"  非置入主軸明細: {non_p}")
+            row_diffs = [(r['站版'][:20], r['正向聲量總數'], r['正面討論'], r['正向聲量總數']-r['正面討論']) for r in main_data]
+            st.write(f"- **好評增加數** = 各列(正向聲量−正面討論)先計算再加總 = **{kpi['好評增加數']}**")
+            with st.expander("查看每列計算"):
+                import pandas as pd
+                df_diff = pd.DataFrame(row_diffs, columns=["站版", "正向聲量", "正面討論", "差值"])
+                st.dataframe(df_diff, use_container_width=True, hide_index=True)
+    
+    with tab3:
+        st.write("**將填入工作表「網友回應分布」**")
+        import pandas as pd
+        df_dist = pd.DataFrame(result["分布"]).T
+        df_dist["回應小計"] = df_dist[["正面討論", "負面討論", "議題討論", "產品討論", "複合討論"]].sum(axis=1)
+        df_dist = df_dist[["實際溝通", "正面討論", "負面討論", "議題討論", "產品討論", "複合討論", "回應小計"]]
+        st.dataframe(df_dist, use_container_width=True)
+        
+        with st.expander("🗂️ 各分類包含的站版"):
+            for cat, sources in result["分布來源"].items():
+                if sources:
+                    st.write(f"**{cat}**: {', '.join(set(sources))}")
+                else:
+                    st.write(f"**{cat}**: (無)")
+    
+    with tab4:
+        st.write("**從 PDF 抽出的原始明細**")
+        import pandas as pd
+        df_raw = pd.DataFrame(main_data)
+        st.dataframe(df_raw, use_container_width=True, hide_index=True)
+
+
+def _render_monthly_preview(main_data, post_types):
+    """渲染月報表預覽(3 個 tab)"""
+    tab1, tab2, tab3 = st.tabs(["📑 操作數據", "📊 版面佔比", "📂 原始資料"])
+    
+    # 預先算總計
+    total_post = sum(r["專案發文量"] for r in main_data)
+    total_reply = sum(r["網友回應量"] for r in main_data)
+    total_volume = sum(r["討論聲量總數"] for r in main_data)
+    sum_pos = sum(r["正面討論"] for r in main_data)
+    sum_neg = sum(r["負面討論"] for r in main_data)
+    sum_topic = sum(r["議題討論"] for r in main_data)
+    sum_prod = sum(r["產品討論"] for r in main_data)
+    sum_combo = sum(r["複合討論"] for r in main_data)
+    denominator = sum_pos + sum_neg + sum_topic + sum_prod + sum_combo
+    
+    def pct(n):
+        return round(n / denominator * 100, 1) if denominator else 0.0
+    
+    with tab1:
+        st.write("**將填入頁簽「網友回應摘要+操作數據」**")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("專案總發文量", f"{total_post} 篇")
+        c2.metric("網友總回應量", f"{total_reply} 篇")
+        c3.metric("討論聲量總數", f"{total_volume} 篇")
+        
+        st.write("**各討論類型比率/篇數**")
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("正面", f"{pct(sum_pos)}%", f"{sum_pos} 篇")
+        c2.metric("負面", f"{pct(sum_neg)}%", f"{sum_neg} 篇")
+        c3.metric("複合", f"{pct(sum_combo)}%", f"{sum_combo} 篇")
+        c4.metric("產品", f"{pct(sum_prod)}%", f"{sum_prod} 篇")
+        c5.metric("議題", f"{pct(sum_topic)}%", f"{sum_topic} 篇")
+        
+        if post_types:
+            with st.expander("📑 文案類型明細"):
+                import pandas as pd
+                df_pt = pd.DataFrame([(k, v) for k, v in post_types.items()], columns=["文案類型", "篇數"])
+                st.dataframe(df_pt, use_container_width=True, hide_index=True)
+    
+    with tab2:
+        st.write("**將填入頁簽「版面佔比」**(網友回應數加總)")
+        cat_reply_sum = {"PTT": 0, "DCARD": 0, "THREAD": 0, "其他版面": 0}
+        cat_sources = {"PTT": [], "DCARD": [], "THREAD": [], "其他版面": []}
+        for r in main_data:
+            cat = categorize_station_monthly(r["站版"])
+            cat_reply_sum[cat] += r["網友回應量"]
+            cat_sources[cat].append(r["站版"])
+        
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("PTT", cat_reply_sum["PTT"])
+        c2.metric("DCARD", cat_reply_sum["DCARD"])
+        c3.metric("THREAD", cat_reply_sum["THREAD"])
+        c4.metric("其他版面", cat_reply_sum["其他版面"])
+        
+        with st.expander("🗂️ 各分類包含的站版"):
+            for cat, sources in cat_sources.items():
+                unique_sources = set(sources)
+                if unique_sources:
+                    st.write(f"**{cat}**: {', '.join(unique_sources)}")
+                else:
+                    st.write(f"**{cat}**: (無)")
+    
+    with tab3:
+        st.write("**從 PDF 抽出的原始明細**")
+        import pandas as pd
+        df_raw = pd.DataFrame(main_data)
+        st.dataframe(df_raw, use_container_width=True, hide_index=True)
+
+
 # ==================== Streamlit UI ====================
 
-st.title("📊 PDF → 結案表填充器")
+st.title("📊 PDF → 報表填充器")
 st.caption("上傳銀河 PDF + Excel 模板,自動算出對應數字並填入")
+
+# === Step 1:選擇報表類型 ===
+st.subheader("🎯 選擇要產生的報表")
+report_type = st.radio(
+    "報表類型",
+    ["結案表", "月報表"],
+    horizontal=True,
+    key="report_type",
+    help="兩種表格格式不同,請依需求選擇"
+)
 
 with st.sidebar:
     st.header("📋 填充規則")
-    st.markdown("""
-    **工作表 1 - 篇數**
-    對應 PDF「文案類型發文篇數」
-    
-    **工作表 2 - KPI**
-    - 網友回應數 = 網友回應量加總
-    - 議題曝光數 = 主軸非「置入」的列數
-    - 內文指名度 = 留空(手動填)
-    - 好評增加數 = 正向聲量總和 − 正面討論總和
-    
-    **工作表 3 - 網友回應分布**
-    - 實際溝通 = 專案發文量
-    - 各討論欄 = 各自加總
-    - 回應小計 = 公式自動計算
-    - 未列出的版面 → 併入「其他版面」
-    """)
+    if report_type == "結案表":
+        st.markdown("""
+        **【結案表】填充規則**
+        
+        **工作表 1 - 篇數**
+        對應 PDF「文案類型發文篇數」
+        
+        **工作表 2 - KPI**
+        - 網友回應數 = 網友回應量加總
+        - 議題曝光數 = 主軸非「置入」的列數
+        - 內文指名度 = 留空(手動填)
+        - 好評增加數 = 各列(正向聲量−正面討論)加總
+        
+        **工作表 3 - 網友回應分布**
+        - 實際溝通 = 專案發文量
+        - 各討論欄 = 各自加總
+        - 回應小計 = 公式自動計算
+        - 未列出的版面 → 併入「其他版面」
+        """)
+    else:
+        st.markdown("""
+        **【月報表】填充規則**
+        
+        **頁簽 1 - 網友回應摘要+操作數據**
+        - 專案總發文量 = 發文量合計 + 文案類型明細
+        - 網友總回應量 / 討論聲量(總數)
+        - 各討論比率/篇數(分母 = 5 類加總)
+        
+        **頁簽 2 - 版面佔比**
+        - PTT / DCARD / THREAD / 其他版面 的網友回應數加總
+        
+        **頁簽 3 - 總覽整理**
+        - 不會被修改(保留模板原樣)
+        """)
 
+st.divider()
+
+# === Step 2:上傳檔案 ===
 col_l, col_r = st.columns(2)
 
 with col_l:
     st.subheader("1️⃣ 上傳 Excel 模板")
+    if report_type == "結案表":
+        template_help = "請上傳「結案表格」模板(.xls 或 .xlsx)"
+    else:
+        template_help = "請上傳「月報表格」模板(.xlsx)"
     template_file = st.file_uploader(
-        "結案表格(.xls 或 .xlsx)",
+        template_help,
         type=["xls", "xlsx"],
         key="template",
     )
@@ -458,7 +704,24 @@ if template_file and pdf_file:
                 st.info("💡 提示:請先用 Excel 把 .xls 另存為 .xlsx 再上傳")
                 st.stop()
     
-    # 把 PDF 存到暫存檔(pdfplumber 需要 path 或 fileobj)
+    # === 驗證模板類型與使用者選擇一致 ===
+    wb_check = load_workbook(BytesIO(template_bytes), read_only=False)
+    detected_type = detect_template_type(wb_check)
+    sheet_names_for_msg = wb_check.sheetnames
+    wb_check.close()
+    
+    expected_type = "monthly" if report_type == "月報表" else "closure"
+    if detected_type != expected_type:
+        if detected_type == "unknown":
+            st.error(f"❌ 無法辨識上傳的模板。請確認是否為正確的「{report_type}」模板。")
+            st.info(f"偵測到的工作表: {sheet_names_for_msg}")
+        else:
+            detected_label = "月報表" if detected_type == "monthly" else "結案表"
+            st.error(f"❌ 模板類型不符!你選了「{report_type}」,但上傳的看起來是「{detected_label}」模板。")
+            st.info("請重新選擇正確的報表類型,或上傳對應的模板。")
+        st.stop()
+    
+    # 把 PDF 存到暫存檔
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
         tmp_pdf.write(pdf_file.getvalue())
         pdf_path = tmp_pdf.name
@@ -472,72 +735,26 @@ if template_file and pdf_file:
             st.error("❌ 無法從 PDF 抽取主表資料,請確認上傳的是正確格式的銀河專案 PDF")
             st.stop()
         
-        result = calculate_all(main_data, post_types)
-        
         st.success(f"✅ 解析成功!共抓到 **{len(main_data)}** 篇文章資料")
         
         # ===== 預覽計算結果 =====
         st.subheader("👀 預覽計算結果")
         
-        tab1, tab2, tab3, tab4 = st.tabs(["📑 篇數", "📈 KPI", "📊 網友回應分布", "📂 原始資料"])
-        
-        with tab1:
-            st.write("**將填入工作表「篇數」**")
-            篇數 = result["篇數"]
-            cols = st.columns(5)
-            for i, (k, v) in enumerate(篇數.items()):
-                cols[i % 5].metric(k, v)
-            st.caption(f"📍 PDF 中抓到的文案類型:{', '.join(post_types.keys()) if post_types else '(無)'}")
-        
-        with tab2:
-            st.write("**將填入工作表「KPI」**")
-            kpi = result["KPI"]
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("網友回應數", f"{kpi['網友回應數']} 篇")
-            c2.metric("議題曝光數", f"{kpi['議題曝光數']} 串")
-            c3.metric("內文指名度", "(手動填)", delta="留空")
-            c4.metric("好評增加數", f"{kpi['好評增加數']} 篇")
-            
-            with st.expander("📐 計算明細"):
-                st.write(f"- **網友回應數** = 網友回應量加總 = **{kpi['網友回應數']}**")
-                non_p = [r['主軸'] for r in main_data if "置入" not in r['主軸']]
-                st.write(f"- **議題曝光數** = 主軸非「置入」的列數 = **{kpi['議題曝光數']}**")
-                st.write(f"  非置入主軸明細: {non_p}")
-                # 好評增加數明細:各列(正向聲量 - 正面討論)
-                row_diffs = [(r['站版'][:20], r['正向聲量總數'], r['正面討論'], r['正向聲量總數']-r['正面討論']) for r in main_data]
-                st.write(f"- **好評增加數** = 各列(正向聲量−正面討論)先計算再加總 = **{kpi['好評增加數']}**")
-                with st.expander("查看每列計算"):
-                    import pandas as pd
-                    df_diff = pd.DataFrame(row_diffs, columns=["站版", "正向聲量", "正面討論", "差值"])
-                    st.dataframe(df_diff, use_container_width=True, hide_index=True)
-        
-        with tab3:
-            st.write("**將填入工作表「網友回應分布」**")
-            import pandas as pd
-            df_dist = pd.DataFrame(result["分布"]).T
-            df_dist["回應小計"] = df_dist[["正面討論", "負面討論", "議題討論", "產品討論", "複合討論"]].sum(axis=1)
-            df_dist = df_dist[["實際溝通", "正面討論", "負面討論", "議題討論", "產品討論", "複合討論", "回應小計"]]
-            st.dataframe(df_dist, use_container_width=True)
-            
-            with st.expander("🗂️ 各分類包含的站版"):
-                for cat, sources in result["分布來源"].items():
-                    if sources:
-                        st.write(f"**{cat}**: {', '.join(set(sources))}")
-                    else:
-                        st.write(f"**{cat}**: (無)")
-        
-        with tab4:
-            st.write("**從 PDF 抽出的原始明細**")
-            import pandas as pd
-            df_raw = pd.DataFrame(main_data)
-            st.dataframe(df_raw, use_container_width=True, hide_index=True)
+        if report_type == "結案表":
+            result = calculate_all(main_data, post_types)
+            _render_closure_preview(result, main_data, post_types)
+        else:
+            _render_monthly_preview(main_data, post_types)
         
         st.divider()
         
         # ===== 產生並下載填好的 Excel =====
         with st.spinner("📝 填入模板..."):
             try:
-                filled_bytes = fill_template(BytesIO(template_bytes), result)
+                if report_type == "月報表":
+                    filled_bytes = fill_monthly_template(BytesIO(template_bytes), main_data, post_types)
+                else:
+                    filled_bytes = fill_template(BytesIO(template_bytes), result)
             except Exception as e:
                 st.error(f"❌ 填入模板失敗: {e}")
                 import traceback
@@ -545,10 +762,10 @@ if template_file and pdf_file:
                 st.stop()
         
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_name = f"結案表格_已填_{timestamp}.xlsx"
+        out_name = f"{report_type}_已填_{timestamp}.xlsx"
         
         st.download_button(
-            label="📥 下載填好的 Excel",
+            label=f"📥 下載填好的 {report_type}",
             data=filled_bytes,
             file_name=out_name,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -556,10 +773,16 @@ if template_file and pdf_file:
             type="primary",
         )
         
-        st.info("💡 **提醒**:\n"
-                "- 工作表 KPI 的「內文指名度」需要您手動填入\n"
-                "- 原模板已保留(只是用上傳檔生成新檔)\n"
-                "- 「網友回應分布」第一個區塊(第 4-13 列)未填,因模板註記為「系統抓取後手動處理」")
+        if report_type == "結案表":
+            st.info("💡 **提醒**:\n"
+                    "- 工作表 KPI 的「內文指名度」需要您手動填入\n"
+                    "- 原模板已保留(只是用上傳檔生成新檔)\n"
+                    "- 「網友回應分布」第一個區塊(第 4-13 列)未填,因模板註記為「系統抓取後手動處理」")
+        else:
+            st.info("💡 **提醒**:\n"
+                    "- 「整體口碑操作議題方向」、「網友正評/負評/複合討論」需要您手動填入\n"
+                    "- 「總覽整理」頁簽不會被修改(保留模板原樣)\n"
+                    "- 原模板已保留(只是用上傳檔生成新檔)")
     
     finally:
         # 清理暫存檔
@@ -567,4 +790,4 @@ if template_file and pdf_file:
             os.unlink(pdf_path)
 
 else:
-    st.info("👆 請上傳 Excel 模板 + PDF 報表後開始")
+    st.info("👆 請選擇報表類型,並上傳 Excel 模板 + PDF 報表後開始")
