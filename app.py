@@ -1,299 +1,570 @@
 """
-PDF → Excel 轉換器
-功能:上傳電子原生 PDF,自動抽取所有表格,轉換成 Excel 下載
+PDF → Excel 結案表填充器
+功能:上傳銀河專案 PDF,自動填入結案表模板對應位置
 """
 import streamlit as st
 import pdfplumber
-import pandas as pd
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
-from io import BytesIO
-from datetime import datetime
 import re
+import unicodedata
+import subprocess
+import tempfile
+import os
+import shutil
+from pathlib import Path
+from io import BytesIO
+from openpyxl import load_workbook
+from datetime import datetime
 
-st.set_page_config(page_title="PDF → Excel 轉換器", page_icon="📄", layout="wide")
+st.set_page_config(page_title="PDF → 結案表填充器", page_icon="📊", layout="wide")
 
-# ==================== 工具函式 ====================
+# ==================== PDF 抽取邏輯 ====================
 
-def clean_cell(value):
-    """清理單一儲存格:去除多餘空白、換行符"""
-    if value is None:
+def normalize(s):
+    """去空白、Unicode 正規化(把 ⽂→文 等異體字統一)"""
+    if s is None:
         return ""
-    text = str(value).strip()
-    # 把表格內換行統一成空格
-    text = re.sub(r'\s+', ' ', text)
-    return text
+    s = str(s)
+    s = unicodedata.normalize('NFKC', s)
+    return re.sub(r'\s+', '', s)
 
 
-def clean_table(raw_table):
-    """清理整個表格,並處理空欄位名稱"""
-    if not raw_table or len(raw_table) < 1:
-        return None
-    
-    # 清理每一格
-    cleaned = [[clean_cell(c) for c in row] for row in raw_table]
-    
-    # 第一列當表頭
-    headers = cleaned[0]
-    rows = cleaned[1:] if len(cleaned) > 1 else []
-    
-    # 處理空表頭、重複表頭
-    final_headers = []
-    seen = {}
-    for i, h in enumerate(headers):
-        name = h if h else f"欄位{i+1}"
-        if name in seen:
-            seen[name] += 1
-            name = f"{name}_{seen[name]}"
-        else:
-            seen[name] = 1
-        final_headers.append(name)
-    
-    # 確保每一列長度與表頭一致
-    fixed_rows = []
-    for row in rows:
-        if len(row) < len(final_headers):
-            row = row + [""] * (len(final_headers) - len(row))
-        elif len(row) > len(final_headers):
-            row = row[:len(final_headers)]
-        fixed_rows.append(row)
-    
-    # 移除完全空白的列
-    fixed_rows = [r for r in fixed_rows if any(cell for cell in r)]
-    
-    if not fixed_rows:
-        return None
-    
-    return pd.DataFrame(fixed_rows, columns=final_headers)
+def is_main_data_row(row):
+    """判斷是否為主表資料列"""
+    if not row or len(row) < 13:
+        return False
+    站版 = normalize(row[0])
+    if not 站版 or 站版 == "合計" or "站版" in 站版:
+        return False
+    try:
+        int(row[4])
+        return True
+    except (ValueError, TypeError):
+        return False
 
 
-def extract_tables_from_pdf(pdf_file):
-    """從 PDF 抽取所有表格,回傳 [(來源描述, DataFrame), ...]"""
-    results = []
-    with pdfplumber.open(pdf_file) as pdf:
-        for page_idx, page in enumerate(pdf.pages, start=1):
-            tables = page.extract_tables()
-            for table_idx, raw in enumerate(tables, start=1):
-                df = clean_table(raw)
-                if df is not None and not df.empty:
-                    label = f"第{page_idx}頁_表{table_idx}"
-                    results.append((label, df))
-    return results
+# 主軸縮寫對照(PDF 中主軸欄位常被切成單字)
+# 由於不同專案可能有不同主軸類型,擴充常見對照;未列出的縮寫會用「文字解析」自動補
+主軸縮寫對照 = {
+    "自": "自品置入",
+    "需": "需求置入",
+    "圖": "圖書/閱讀",
+    "會": "會員/品牌",
+    "百": "百貨",
+    "競": "競品置入",  # 或「競品議題置入」
+    "全": "全域置入",
+    "社": "社團置入",
+    "消": "消費者需求置入",
+    "情": "情境話題",
+    "產": "產品話題",
+    "話": "話題",
+}
+
+# 站版前綴關鍵字 — 用來辨識一行是否以「站版」開頭
+站版前綴 = ["Threads", "PTT", "Facebook", "Dcard", "Mobile01", "eyny", "Plurk",
+             "BabyHome", "FG", "伊莉", "狄卡", "批踢踢", "FashionGuide"]
+
+# 行尾「任意單一中文字 + 日期前半 + 9 個數字」的通用特徵
+# 這樣就不必預先列出所有可能的主軸縮寫
+ROW_PATTERN = re.compile(
+    r'([\u4e00-\u9fff])\s+'                                        # 主軸縮寫(任意單字)
+    r'\d{4}-\s+'                                                   # 日期 yyyy-
+    r'(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+'                            # 發文 回應 聲量 正向
+    r'(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)'                       # 正面 負面 議題 產品 複合
+    r'\s*$', re.MULTILINE
+)
 
 
-def extract_text_from_pdf(pdf_file):
-    """抽取所有純文字 (萬一找不到表格時備用)"""
-    text_pages = []
-    with pdfplumber.open(pdf_file) as pdf:
-        for i, page in enumerate(pdf.pages, start=1):
-            text = page.extract_text() or ""
-            text_pages.append((f"第{i}頁", text))
-    return text_pages
+def get_main_category_from_pdf(pdf_path):
+    """從 PDF 第 3 頁的「操作主軸」表抽出實際主軸全名,建立縮寫到全名的對應"""
+    extracted = {}
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            for table in page.extract_tables():
+                if not table:
+                    continue
+                head = [normalize(c) for c in table[0]] if table[0] else []
+                # 「操作主軸」表的特徵:第一列 ['類型', '累計']
+                if "類型" in head and "累計" in head:
+                    for row in table[1:]:
+                        if len(row) >= 2 and row[0]:
+                            name = normalize(row[0])
+                            if name and name != "合計":
+                                # 取第一個字當縮寫
+                                extracted[name[0]] = name
+    return extracted
 
 
-def style_worksheet(ws, df):
-    """套用表頭樣式、自動欄寬"""
-    # 表頭樣式
-    header_font = Font(name="Arial", bold=True, color="FFFFFF", size=11)
-    header_fill = PatternFill("solid", start_color="4472C4")
-    header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    thin = Side(border_style="thin", color="CCCCCC")
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+def extract_main_table_via_text(pdf_path):
+    """用「行尾 9 個數字」特徵從純文字中抓主表資料(比 extract_tables 穩健)
     
-    # 設定表頭
-    for col_idx, _ in enumerate(df.columns, start=1):
-        cell = ws.cell(row=1, column=col_idx)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = header_align
-        cell.border = border
-    
-    # 內容樣式 + 框線
-    body_font = Font(name="Arial", size=10)
-    body_align = Alignment(vertical="center", wrap_text=True)
-    for row in ws.iter_rows(min_row=2, max_row=ws.max_row, max_col=ws.max_column):
-        for cell in row:
-            cell.font = body_font
-            cell.alignment = body_align
-            cell.border = border
-    
-    # 自動欄寬 (依據內容最長字元)
-    for col_idx, col_name in enumerate(df.columns, start=1):
-        col_letter = get_column_letter(col_idx)
-        max_len = len(str(col_name))
-        for value in df.iloc[:, col_idx - 1].astype(str):
-            max_len = max(max_len, len(value))
-        ws.column_dimensions[col_letter].width = min(max(max_len + 2, 10), 50)
-    
-    # 凍結首列
-    ws.freeze_panes = "A2"
-
-
-def build_excel(tables, mode="multi"):
+    判斷邏輯:任何一行只要結尾是「中文字 + yyyy- + 9個數字」就視為資料列。
+    這個結構足以唯一識別資料列(合計列、表頭、空白行都不會符合)。
+    不依賴站版名稱字典,適用於任何站版。
     """
-    把表格資料建成 Excel
-    mode: "multi" = 每個表一個工作表; "single" = 全部合併到一個工作表
-    """
-    wb = Workbook()
-    wb.remove(wb.active)  # 移除預設空白工作表
+    with pdfplumber.open(pdf_path) as pdf:
+        full_text = ""
+        for page in pdf.pages:
+            page_text = page.extract_text() or ""
+            full_text += unicodedata.normalize('NFKC', page_text) + "\n"
     
-    if mode == "multi":
-        used_names = set()
-        for label, df in tables:
-            # Excel 工作表名稱限制 31 字、不能含特殊字元
-            safe_name = re.sub(r'[\\/*?:\[\]]', '_', label)[:31]
-            # 避免重名
-            base = safe_name
-            counter = 1
-            while safe_name in used_names:
-                safe_name = f"{base[:28]}_{counter}"
-                counter += 1
-            used_names.add(safe_name)
-            
-            ws = wb.create_sheet(safe_name)
-            # 寫入表頭
-            ws.append(list(df.columns))
-            # 寫入資料
-            for _, row in df.iterrows():
-                ws.append(list(row.values))
-            style_worksheet(ws, df)
+    # 從 PDF 第 3 頁的「操作主軸」表抓主軸全名(動態對照)
+    dynamic_mapping = get_main_category_from_pdf(pdf_path)
+    mapping = {**主軸縮寫對照, **dynamic_mapping}
     
-    else:  # single 模式:合併
-        ws = wb.create_sheet("合併資料")
-        first = True
-        for label, df in tables:
-            # 加上來源標記列
-            ws.append([f"=== {label} ==="])
-            source_cell = ws.cell(row=ws.max_row, column=1)
-            source_cell.font = Font(bold=True, color="C00000", size=11)
-            
-            ws.append(list(df.columns))
-            header_row_idx = ws.max_row
-            for _, row in df.iterrows():
-                ws.append(list(row.values))
-            
-            # 簡單套用表頭樣式
-            for col_idx in range(1, len(df.columns) + 1):
-                c = ws.cell(row=header_row_idx, column=col_idx)
-                c.font = Font(name="Arial", bold=True, color="FFFFFF")
-                c.fill = PatternFill("solid", start_color="4472C4")
-                c.alignment = Alignment(horizontal="center")
-            
-            ws.append([])  # 空白行分隔
+    rows = []
+    for m in ROW_PATTERN.finditer(full_text):
+        主軸縮寫 = m.group(1)
+        nums = [int(m.group(i)) for i in range(2, 11)]
         
-        # 自動欄寬
-        for col_idx in range(1, ws.max_column + 1):
-            col_letter = get_column_letter(col_idx)
-            max_len = 10
-            for row in ws.iter_rows(min_col=col_idx, max_col=col_idx):
-                for cell in row:
-                    if cell.value:
-                        max_len = max(max_len, len(str(cell.value)))
-            ws.column_dimensions[col_letter].width = min(max_len + 2, 50)
+        # 取該行從行首到主軸縮寫之前的文字 = 站版 + 標題
+        line_start = full_text.rfind('\n', 0, m.start()) + 1
+        line_part = full_text[line_start:m.start()].strip()
+        
+        # 過濾:行首不能是純數字(避免抓到「合計」之類的列被誤判)
+        # 合計列開頭是「合計」,且後面沒有主軸縮寫前綴 → 不會匹配 ROW_PATTERN
+        # 但保險起見再加一道過濾:行內容如果完全沒有站版字串(空字串/太短)就跳過
+        if len(line_part) < 3:
+            continue
+        
+        # 對應主軸全名(找不到就用縮寫本身)
+        主軸全名 = mapping.get(主軸縮寫, 主軸縮寫)
+        
+        rows.append({
+            "站版": line_part,
+            "標題": "",
+            "主軸": 主軸全名,
+            "專案發文量": nums[0],
+            "網友回應量": nums[1],
+            "討論聲量總數": nums[2],
+            "正向聲量總數": nums[3],
+            "正面討論": nums[4],
+            "負面討論": nums[5],
+            "議題討論": nums[6],
+            "產品討論": nums[7],
+            "複合討論": nums[8],
+        })
+    return rows
+
+
+def extract_main_table(pdf_path):
+    """抽取主表(優先用文字解析,備援用表格解析)"""
+    # 文字解析法:更穩健,能避免 pdfplumber 跨頁切錯
+    rows = extract_main_table_via_text(pdf_path)
+    if rows:
+        return rows
     
+    # 備援:表格解析(萬一文字解析失效)
+    fallback_rows = []
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            for table in page.extract_tables():
+                if not table:
+                    continue
+                for row in table:
+                    if is_main_data_row(row):
+                        fallback_rows.append({
+                            "站版": normalize(row[0]),
+                            "標題": (row[1] or "").strip().replace('\n', ' '),
+                            "主軸": normalize(row[2]),
+                            "專案發文量": int(row[4]),
+                            "網友回應量": int(row[5]),
+                            "討論聲量總數": int(row[6]),
+                            "正向聲量總數": int(row[7]),
+                            "正面討論": int(row[8]),
+                            "負面討論": int(row[9]),
+                            "議題討論": int(row[10]),
+                            "產品討論": int(row[11]),
+                            "複合討論": int(row[12]),
+                        })
+    return fallback_rows
+
+
+def extract_post_types(pdf_path):
+    """抽取「文案類型發文篇數」表格,回傳 dict {類型名: 數量}"""
+    types = {}
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            for table in page.extract_tables():
+                if not table:
+                    continue
+                head = [normalize(c) for c in table[0]] if table[0] else []
+                if "文案類型" in head and "累計" in head:
+                    for row in table[1:]:
+                        if len(row) >= 2 and row[0] and row[1] is not None:
+                            name = normalize(row[0])
+                            if name in ("合計", ""):
+                                continue
+                            try:
+                                types[name] = int(str(row[1]).strip())
+                            except ValueError:
+                                pass
+    return types
+
+
+# ==================== 計算邏輯 ====================
+
+def categorize_station(stb):
+    """把站版名稱對應到模板分類"""
+    s = normalize(stb)
+    if "PTT" in s.upper():
+        return "PTT"
+    if "Dcard" in s or "狄卡" in s:
+        return "Dcard"
+    if "Threads" in s:
+        return "Threads"
+    if "Facebook" in s or "FB" in s:
+        return "FB社團"
+    return "其他版面"
+
+
+def calculate_all(main_data, post_types):
+    """計算所有要填入模板的數字"""
+    result = {}
+    
+    # ===== 工作表 1:篇數 =====
+    # 模板欄位 → PDF 對應名稱
+    type_mapping = {
+        "2~3圖+分享文(素人拍+過稿)": ["2~3圖+分享文(提供照片+過稿)", "2~3圖+分享文(素人拍+過稿)", "2~3圖+分享文"],
+        "1圖+分享文(素人拍+過稿)": ["1圖+分享文(提供照片+過稿)", "1圖+分享文(素人拍+過稿)", "1圖+分享文"],
+        "分享文": ["分享文"],
+        "詳文": ["詳文"],
+        "主文": ["主文"],
+        "推文": ["推文"],
+        "FB-主文": ["FB-主文"],
+        "FB-推文": ["FB-推文"],
+        "置入主文": ["置入主文"],
+        "置入推文": ["置入推文"],
+    }
+    
+    篇數 = {}
+    for template_name, pdf_names in type_mapping.items():
+        value = 0
+        for pdf_name in pdf_names:
+            for k, v in post_types.items():
+                if normalize(pdf_name) == normalize(k):
+                    value = v
+                    break
+            if value > 0:
+                break
+        篇數[template_name] = value
+    result["篇數"] = 篇數
+    
+    # ===== 工作表 2:KPI =====
+    kpi = {}
+    # 網友回應數 = 網友回應量整列加總
+    kpi["網友回應數"] = sum(r["網友回應量"] for r in main_data)
+    # 議題曝光數 = 主軸不含「置入」的列數
+    kpi["議題曝光數"] = sum(1 for r in main_data if "置入" not in r["主軸"])
+    # 內文指名度 = 跳過(使用者填)
+    kpi["內文指名度"] = None
+    # 好評增加數 = 各列「正向聲量總數 - 正面討論」先逐列相減再加總
+    kpi["好評增加數"] = sum(r["正向聲量總數"] - r["正面討論"] for r in main_data)
+    result["KPI"] = kpi
+    
+    # ===== 工作表 3:網友回應分布 =====
+    # 模板順序:PTT、Dcard、Threads、其他版面、FB社團
+    分布 = {}
+    for cat in ["PTT", "Dcard", "Threads", "其他版面", "FB社團"]:
+        items = [r for r in main_data if categorize_station(r["站版"]) == cat]
+        分布[cat] = {
+            "實際溝通": sum(r["專案發文量"] for r in items),
+            "正面討論": sum(r["正面討論"] for r in items),
+            "負面討論": sum(r["負面討論"] for r in items),
+            "議題討論": sum(r["議題討論"] for r in items),
+            "產品討論": sum(r["產品討論"] for r in items),
+            "複合討論": sum(r["複合討論"] for r in items),
+        }
+    result["分布"] = 分布
+    result["分布來源"] = {
+        cat: [r["站版"] for r in main_data if categorize_station(r["站版"]) == cat]
+        for cat in ["PTT", "Dcard", "Threads", "其他版面", "FB社團"]
+    }
+    
+    return result
+
+
+# ==================== 填充模板 ====================
+
+def fill_template(template_path, calc_result):
+    """把計算結果填入模板,回傳填好的 xlsx bytes"""
+    wb = load_workbook(template_path)
+    
+    # ----- 工作表 1:篇數 -----
+    ws1 = wb["篇數"]
+    篇數欄位映射 = {
+        "2~3圖+分享文(素人拍+過稿)": "C8",
+        "1圖+分享文(素人拍+過稿)": "D8",
+        "分享文": "E8",
+        "詳文": "F8",
+        "主文": "G8",
+        "推文": "H8",
+        "FB-主文": "I8",
+        "FB-推文": "J8",
+        "置入主文": "K8",
+        "置入推文": "L8",
+    }
+    for name, cell in 篇數欄位映射.items():
+        ws1[cell] = calc_result["篇數"].get(name, 0)
+    
+    # 區塊 A 上方小表(第 3-5 列):欄位順序跟第 7-8 列相同
+    # 第 4 列「篇數」= 與第 8 列同樣的數字
+    # 第 5 列「總計」= 橫列加總
+    上方小表映射 = {
+        "2~3圖+分享文(素人拍+過稿)": "C4",  # 對應 C3「2~3圖分享文」
+        "1圖+分享文(素人拍+過稿)": "D4",   # 對應 D3「1圖分享文」
+        "分享文": "E4",
+        "詳文": "F4",
+        "主文": "G4",
+        "推文": "H4",
+        "FB-主文": "I4",
+        "FB-推文": "J4",
+        "置入主文": "K4",
+        "置入推文": "L4",
+    }
+    for name, cell in 上方小表映射.items():
+        ws1[cell] = calc_result["篇數"].get(name, 0)
+    # 第 5 列「總計」= 橫列加總
+    ws1["C5"] = "=SUM(C4:L4)"
+    
+    # 區塊 B (直式清單) - 第 14~24 列
+    區塊B映射 = {
+        "2~3圖+分享文(素人拍+過稿)": "C15",
+        "1圖+分享文(素人拍+過稿)": "C16",
+        "分享文": "C17",
+        "詳文": "C18",
+        "主文": "C19",
+        "推文": "C20",
+        "FB-主文": "C21",
+        "FB-推文": "C22",
+        "置入主文": "C23",
+        "置入推文": "C24",
+    }
+    for name, cell in 區塊B映射.items():
+        ws1[cell] = calc_result["篇數"].get(name, 0)
+    # C25 是合計,用公式
+    ws1["C25"] = "=SUM(C15:C24)"
+    
+    # ----- 工作表 2:KPI -----
+    ws2 = wb["KPI"]
+    ws2["D4"] = f"{calc_result['KPI']['網友回應數']}篇"
+    ws2["D5"] = f"{calc_result['KPI']['議題曝光數']}串"
+    # D6 內文指名度 - 跳過(留原值或清空)
+    ws2["D6"] = ""  # 清空,讓使用者自己填
+    ws2["D7"] = f"{calc_result['KPI']['好評增加數']}篇"
+    
+    # ----- 工作表 3:網友回應分布 -----
+    ws3 = wb["網友回應分布"]
+    # 列對應(已知模板:PTT=5列, Dcard=6列, Threads=7列, 其他=8列, FB=9列)
+    版面列對應 = {
+        "PTT": 5,
+        "Dcard": 6,
+        "Threads": 7,
+        "其他版面": 8,
+        "FB社團": 9,
+    }
+    for cat, row_num in 版面列對應.items():
+        d = calc_result["分布"][cat]
+        ws3.cell(row=row_num, column=3).value = d["實際溝通"]   # C
+        ws3.cell(row=row_num, column=4).value = d["正面討論"]   # D
+        ws3.cell(row=row_num, column=5).value = d["負面討論"]   # E
+        ws3.cell(row=row_num, column=6).value = d["議題討論"]   # F
+        ws3.cell(row=row_num, column=7).value = d["產品討論"]   # G
+        ws3.cell(row=row_num, column=8).value = d["複合討論"]   # H
+        # I 欄(回應小計)= 正+負+議+產+複,用公式自動計算
+        ws3.cell(row=row_num, column=9).value = f"=SUM(D{row_num}:H{row_num})"
+    # 第 14 列「發文篇數總計」模板已內建公式 =SUM(C5:C13) 等,不需另外處理
+    
+    # 輸出到 bytes
     output = BytesIO()
     wb.save(output)
     return output.getvalue()
 
 
-# ==================== UI ====================
+def convert_xls_to_xlsx(xls_bytes):
+    """把 .xls 轉成 .xlsx (因為 openpyxl 無法處理舊版 .xls)"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        in_path = os.path.join(tmpdir, "input.xls")
+        with open(in_path, "wb") as f:
+            f.write(xls_bytes)
+        
+        result = subprocess.run(
+            ['libreoffice', '--headless', '--convert-to', 'xlsx', '--outdir', tmpdir, in_path],
+            capture_output=True, text=True, timeout=120
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"LibreOffice 轉檔失敗: {result.stderr}")
+        
+        out_path = os.path.join(tmpdir, "input.xlsx")
+        if not os.path.exists(out_path):
+            raise RuntimeError("LibreOffice 沒有產生 xlsx 檔")
+        
+        with open(out_path, "rb") as f:
+            return f.read()
 
-st.title("📄 PDF → Excel 轉換器")
-st.caption("上傳電子原生 PDF,自動抽取表格並轉換成 Excel")
+
+# ==================== Streamlit UI ====================
+
+st.title("📊 PDF → 結案表填充器")
+st.caption("上傳銀河 PDF + Excel 模板,自動算出對應數字並填入")
 
 with st.sidebar:
-    st.header("⚙️ 設定")
-    output_mode = st.radio(
-        "輸出模式",
-        ["每個表格獨立工作表", "全部合併到單一工作表"],
-        help="多個表格時的處理方式"
-    )
-    show_preview = st.checkbox("顯示預覽", value=True)
-    st.divider()
+    st.header("📋 填充規則")
     st.markdown("""
-    **支援類型**
-    - ✅ 電子原生 PDF (文字可選取)
-    - ✅ 表格清楚有框線
-    - ❌ 掃描的圖片 PDF
-    - ❌ 複雜合併儲存格表格
+    **工作表 1 - 篇數**
+    對應 PDF「文案類型發文篇數」
+    
+    **工作表 2 - KPI**
+    - 網友回應數 = 網友回應量加總
+    - 議題曝光數 = 主軸非「置入」的列數
+    - 內文指名度 = 留空(手動填)
+    - 好評增加數 = 正向聲量總和 − 正面討論總和
+    
+    **工作表 3 - 網友回應分布**
+    - 實際溝通 = 專案發文量
+    - 各討論欄 = 各自加總
+    - 回應小計 = 公式自動計算
+    - 未列出的版面 → 併入「其他版面」
     """)
 
-uploaded_file = st.file_uploader("📤 拖曳或點選上傳 PDF", type=["pdf"])
+col_l, col_r = st.columns(2)
 
-if uploaded_file:
-    file_size = len(uploaded_file.getvalue()) / 1024
-    st.info(f"📎 已上傳: **{uploaded_file.name}** ({file_size:.1f} KB)")
-    
-    with st.spinner("🔍 正在分析 PDF 並抽取表格..."):
-        try:
-            tables = extract_tables_from_pdf(uploaded_file)
-        except Exception as e:
-            st.error(f"❌ PDF 解析失敗: {e}")
-            st.stop()
-    
-    if not tables:
-        st.warning("⚠️ 沒有偵測到任何表格")
-        with st.expander("📃 查看 PDF 純文字內容(用於除錯)"):
-            uploaded_file.seek(0)
-            text_pages = extract_text_from_pdf(uploaded_file)
-            for label, text in text_pages:
-                st.markdown(f"**{label}**")
-                st.text(text[:2000] if text else "(無文字)")
-        st.stop()
-    
-    st.success(f"✅ 成功偵測到 **{len(tables)}** 個表格")
-    
-    # 預覽
-    if show_preview:
-        st.subheader("👀 表格預覽")
-        for label, df in tables:
-            with st.expander(f"📊 {label} ({len(df)} 列 × {len(df.columns)} 欄)", expanded=True):
-                st.dataframe(df, use_container_width=True, hide_index=True)
-    
-    # 統計資訊
-    col1, col2, col3 = st.columns(3)
-    col1.metric("📊 表格總數", len(tables))
-    col2.metric("📝 總列數", sum(len(df) for _, df in tables))
-    col3.metric("📋 總欄數", sum(len(df.columns) for _, df in tables))
-    
-    st.divider()
-    
-    # 產生 Excel
-    mode = "multi" if "獨立" in output_mode else "single"
-    excel_bytes = build_excel(tables, mode=mode)
-    
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base_name = uploaded_file.name.rsplit(".", 1)[0]
-    output_filename = f"{base_name}_{timestamp}.xlsx"
-    
-    st.download_button(
-        label="📥 下載 Excel 檔案",
-        data=excel_bytes,
-        file_name=output_filename,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-        type="primary",
+with col_l:
+    st.subheader("1️⃣ 上傳 Excel 模板")
+    template_file = st.file_uploader(
+        "結案表格(.xls 或 .xlsx)",
+        type=["xls", "xlsx"],
+        key="template",
     )
 
-else:
-    st.info("👆 請上傳一個 PDF 檔案開始")
+with col_r:
+    st.subheader("2️⃣ 上傳 PDF 報表")
+    pdf_file = st.file_uploader(
+        "銀河專案 PDF",
+        type=["pdf"],
+        key="pdf",
+    )
+
+if template_file and pdf_file:
+    st.divider()
     
-    with st.expander("💡 使用說明 / 常見問題"):
-        st.markdown("""
-        **這個工具能做什麼?**
-        - 自動抽取 PDF 中的所有表格
-        - 把每個表格轉成 Excel 工作表
-        - 套用專業樣式(表頭、框線、自動欄寬)
-        - 凍結首列方便檢視
+    # 處理模板:.xls 要先轉成 .xlsx
+    template_bytes = template_file.getvalue()
+    if template_file.name.lower().endswith(".xls"):
+        with st.spinner("🔄 轉換 .xls 模板格式中..."):
+            try:
+                template_bytes = convert_xls_to_xlsx(template_bytes)
+            except Exception as e:
+                st.error(f"❌ 模板轉檔失敗: {e}")
+                st.info("💡 提示:請先用 Excel 把 .xls 另存為 .xlsx 再上傳")
+                st.stop()
+    
+    # 把 PDF 存到暫存檔(pdfplumber 需要 path 或 fileobj)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
+        tmp_pdf.write(pdf_file.getvalue())
+        pdf_path = tmp_pdf.name
+    
+    try:
+        with st.spinner("🔍 解析 PDF 並計算數據..."):
+            main_data = extract_main_table(pdf_path)
+            post_types = extract_post_types(pdf_path)
         
-        **效果不好怎麼辦?**
-        1. 確認 PDF 是「文字可選取」的版本(不是掃描檔)
-        2. 表格如果沒有清楚的格線,辨識率會降低
-        3. 跨頁表格可能會被切成兩個表(可選擇「合併」模式)
-        4. 複雜的合併儲存格可能解析錯誤
+        if not main_data:
+            st.error("❌ 無法從 PDF 抽取主表資料,請確認上傳的是正確格式的銀河專案 PDF")
+            st.stop()
         
-        **完全沒抽到表格?**
-        - 點開「查看 PDF 純文字內容」確認 PDF 是否真的有文字
-        - 如果是掃描檔,需要 OCR(本工具暫不支援)
-        """)
+        result = calculate_all(main_data, post_types)
+        
+        st.success(f"✅ 解析成功!共抓到 **{len(main_data)}** 篇文章資料")
+        
+        # ===== 預覽計算結果 =====
+        st.subheader("👀 預覽計算結果")
+        
+        tab1, tab2, tab3, tab4 = st.tabs(["📑 篇數", "📈 KPI", "📊 網友回應分布", "📂 原始資料"])
+        
+        with tab1:
+            st.write("**將填入工作表「篇數」**")
+            篇數 = result["篇數"]
+            cols = st.columns(5)
+            for i, (k, v) in enumerate(篇數.items()):
+                cols[i % 5].metric(k, v)
+            st.caption(f"📍 PDF 中抓到的文案類型:{', '.join(post_types.keys()) if post_types else '(無)'}")
+        
+        with tab2:
+            st.write("**將填入工作表「KPI」**")
+            kpi = result["KPI"]
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("網友回應數", f"{kpi['網友回應數']} 篇")
+            c2.metric("議題曝光數", f"{kpi['議題曝光數']} 串")
+            c3.metric("內文指名度", "(手動填)", delta="留空")
+            c4.metric("好評增加數", f"{kpi['好評增加數']} 篇")
+            
+            with st.expander("📐 計算明細"):
+                st.write(f"- **網友回應數** = 網友回應量加總 = **{kpi['網友回應數']}**")
+                non_p = [r['主軸'] for r in main_data if "置入" not in r['主軸']]
+                st.write(f"- **議題曝光數** = 主軸非「置入」的列數 = **{kpi['議題曝光數']}**")
+                st.write(f"  非置入主軸明細: {non_p}")
+                # 好評增加數明細:各列(正向聲量 - 正面討論)
+                row_diffs = [(r['站版'][:20], r['正向聲量總數'], r['正面討論'], r['正向聲量總數']-r['正面討論']) for r in main_data]
+                st.write(f"- **好評增加數** = 各列(正向聲量−正面討論)先計算再加總 = **{kpi['好評增加數']}**")
+                with st.expander("查看每列計算"):
+                    import pandas as pd
+                    df_diff = pd.DataFrame(row_diffs, columns=["站版", "正向聲量", "正面討論", "差值"])
+                    st.dataframe(df_diff, use_container_width=True, hide_index=True)
+        
+        with tab3:
+            st.write("**將填入工作表「網友回應分布」**")
+            import pandas as pd
+            df_dist = pd.DataFrame(result["分布"]).T
+            df_dist["回應小計"] = df_dist[["正面討論", "負面討論", "議題討論", "產品討論", "複合討論"]].sum(axis=1)
+            df_dist = df_dist[["實際溝通", "正面討論", "負面討論", "議題討論", "產品討論", "複合討論", "回應小計"]]
+            st.dataframe(df_dist, use_container_width=True)
+            
+            with st.expander("🗂️ 各分類包含的站版"):
+                for cat, sources in result["分布來源"].items():
+                    if sources:
+                        st.write(f"**{cat}**: {', '.join(set(sources))}")
+                    else:
+                        st.write(f"**{cat}**: (無)")
+        
+        with tab4:
+            st.write("**從 PDF 抽出的原始明細**")
+            import pandas as pd
+            df_raw = pd.DataFrame(main_data)
+            st.dataframe(df_raw, use_container_width=True, hide_index=True)
+        
+        st.divider()
+        
+        # ===== 產生並下載填好的 Excel =====
+        with st.spinner("📝 填入模板..."):
+            try:
+                filled_bytes = fill_template(BytesIO(template_bytes), result)
+            except Exception as e:
+                st.error(f"❌ 填入模板失敗: {e}")
+                import traceback
+                st.code(traceback.format_exc())
+                st.stop()
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_name = f"結案表格_已填_{timestamp}.xlsx"
+        
+        st.download_button(
+            label="📥 下載填好的 Excel",
+            data=filled_bytes,
+            file_name=out_name,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            type="primary",
+        )
+        
+        st.info("💡 **提醒**:\n"
+                "- 工作表 KPI 的「內文指名度」需要您手動填入\n"
+                "- 原模板已保留(只是用上傳檔生成新檔)\n"
+                "- 「網友回應分布」第一個區塊(第 4-13 列)未填,因模板註記為「系統抓取後手動處理」")
+    
+    finally:
+        # 清理暫存檔
+        if os.path.exists(pdf_path):
+            os.unlink(pdf_path)
+
+else:
+    st.info("👆 請上傳 Excel 模板 + PDF 報表後開始")
