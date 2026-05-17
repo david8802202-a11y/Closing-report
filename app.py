@@ -353,6 +353,7 @@ def fill_monthly_template(template_path, main_data, post_types):
     # ----- 頁簽 2:版面佔比 -----
     ws2 = wb["版面佔比"]
     # 模板已有的:B10 PTT / B11 DCARD / B12 THREAD / B13 其他版面
+    # 「網友回應數」欄位 = PDF 各站版的「網友回應量」加總
     cat_reply_sum = {"PTT": 0, "DCARD": 0, "THREAD": 0, "其他版面": 0}
     for r in main_data:
         cat = categorize_station_monthly(r["站版"])
@@ -584,7 +585,7 @@ def _render_monthly_preview(main_data, post_types):
                 st.dataframe(df_pt, use_container_width=True, hide_index=True)
     
     with tab2:
-        st.write("**將填入頁簽「版面佔比」**(網友回應數加總)")
+        st.write("**將填入頁簽「版面佔比」**(網友回應量加總)")
         cat_reply_sum = {"PTT": 0, "DCARD": 0, "THREAD": 0, "其他版面": 0}
         cat_sources = {"PTT": [], "DCARD": [], "THREAD": [], "其他版面": []}
         for r in main_data:
@@ -659,7 +660,7 @@ with st.sidebar:
         - 各討論比率/篇數(分母 = 5 類加總)
         
         **頁簽 2 - 版面佔比**
-        - PTT / DCARD / THREAD / 其他版面 的網友回應數加總
+        - PTT / DCARD / THREAD / 其他版面 的網友回應量加總
         
         **頁簽 3 - 總覽整理**
         - 不會被修改(保留模板原樣)
