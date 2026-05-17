@@ -296,13 +296,20 @@ def detect_template_type(wb):
 
 
 def categorize_station_monthly(stb):
-    """月報表的站版分類:PTT / DCARD / THREAD / 其他版面"""
-    s = normalize(stb)
-    if "PTT" in s.upper():
+    """月報表的站版分類:PTT / DCARD / THREAD / 其他版面
+    
+    分類規則(大小寫不敏感):
+    - PTT: 站版含 "ptt" 或 "批踢踢"
+    - DCARD: 站版含 "dcard" 或 "狄卡"
+    - THREAD: 站版含 "thread"(也匹配 Threads/threads/THREADS)
+    - 其他版面: 上述以外的所有版面
+    """
+    s = normalize(stb).lower()  # 全部轉小寫做比對
+    if "ptt" in s or "批踢踢" in stb:
         return "PTT"
-    if "Dcard" in s or "狄卡" in s:
+    if "dcard" in s or "狄卡" in stb:
         return "DCARD"
-    if "Threads" in s:
+    if "thread" in s:  # 涵蓋 thread/threads/Thread/Threads/THREADS
         return "THREAD"
     return "其他版面"
 
