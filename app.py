@@ -360,16 +360,17 @@ def fill_monthly_template(template_path, main_data, post_types):
     # ----- 頁簽 2:版面佔比 -----
     ws2 = wb["版面佔比"]
     # 模板已有的:B10 PTT / B11 DCARD / B12 THREAD / B13 其他版面
-    # 「網友回應數」欄位 = PDF 各站版的「網友回應量」加總
-    cat_reply_sum = {"PTT": 0, "DCARD": 0, "THREAD": 0, "其他版面": 0}
+    # 「網友回應數」欄位填的是「討論聲量總數」加總
+    # (與 PDF 第 2 頁「專案聲量分佈」表格一致)
+    cat_volume_sum = {"PTT": 0, "DCARD": 0, "THREAD": 0, "其他版面": 0}
     for r in main_data:
         cat = categorize_station_monthly(r["站版"])
-        cat_reply_sum[cat] += r["網友回應量"]
+        cat_volume_sum[cat] += r["討論聲量總數"]
     
-    ws2["C10"] = cat_reply_sum["PTT"]
-    ws2["C11"] = cat_reply_sum["DCARD"]
-    ws2["C12"] = cat_reply_sum["THREAD"]
-    ws2["C13"] = cat_reply_sum["其他版面"]
+    ws2["C10"] = cat_volume_sum["PTT"]
+    ws2["C11"] = cat_volume_sum["DCARD"]
+    ws2["C12"] = cat_volume_sum["THREAD"]
+    ws2["C13"] = cat_volume_sum["其他版面"]
     
     # ----- 頁簽 3「總覽整理」:不處理 -----
     
@@ -592,19 +593,19 @@ def _render_monthly_preview(main_data, post_types):
                 st.dataframe(df_pt, use_container_width=True, hide_index=True)
     
     with tab2:
-        st.write("**將填入頁簽「版面佔比」**(網友回應量加總)")
-        cat_reply_sum = {"PTT": 0, "DCARD": 0, "THREAD": 0, "其他版面": 0}
+        st.write("**將填入頁簽「版面佔比」**(討論聲量總數加總,對應 PDF 第 2 頁「專案聲量分佈」)")
+        cat_volume_sum = {"PTT": 0, "DCARD": 0, "THREAD": 0, "其他版面": 0}
         cat_sources = {"PTT": [], "DCARD": [], "THREAD": [], "其他版面": []}
         for r in main_data:
             cat = categorize_station_monthly(r["站版"])
-            cat_reply_sum[cat] += r["網友回應量"]
+            cat_volume_sum[cat] += r["討論聲量總數"]
             cat_sources[cat].append(r["站版"])
         
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("PTT", cat_reply_sum["PTT"])
-        c2.metric("DCARD", cat_reply_sum["DCARD"])
-        c3.metric("THREAD", cat_reply_sum["THREAD"])
-        c4.metric("其他版面", cat_reply_sum["其他版面"])
+        c1.metric("PTT", cat_volume_sum["PTT"])
+        c2.metric("DCARD", cat_volume_sum["DCARD"])
+        c3.metric("THREAD", cat_volume_sum["THREAD"])
+        c4.metric("其他版面", cat_volume_sum["其他版面"])
         
         with st.expander("🗂️ 各分類包含的站版"):
             for cat, sources in cat_sources.items():
@@ -613,6 +614,22 @@ def _render_monthly_preview(main_data, post_types):
                     st.write(f"**{cat}**: {', '.join(unique_sources)}")
                 else:
                     st.write(f"**{cat}**: (無)")
+        
+        # 🔍 除錯面板:逐筆顯示分類結果
+        with st.expander("🔍 除錯:每一筆的分類明細(如果結果不對請看這裡)"):
+            import pandas as pd
+            debug_rows = []
+            for i, r in enumerate(main_data, 1):
+                cat = categorize_station_monthly(r["站版"])
+                debug_rows.append({
+                    "#": i,
+                    "站版字串(原始)": repr(r["站版"])[:60],
+                    "分類結果": cat,
+                    "討論聲量總數": r["討論聲量總數"],
+                })
+            df_debug = pd.DataFrame(debug_rows)
+            st.dataframe(df_debug, use_container_width=True, hide_index=True)
+            st.caption("💡 若某筆被歸到錯的分類,請複製該列「站版字串(原始)」傳給開發者")
     
     with tab3:
         st.write("**從 PDF 抽出的原始明細**")
@@ -667,7 +684,8 @@ with st.sidebar:
         - 各討論比率/篇數(分母 = 5 類加總)
         
         **頁簽 2 - 版面佔比**
-        - PTT / DCARD / THREAD / 其他版面 的網友回應量加總
+        - PTT / DCARD / THREAD / 其他版面 的「討論聲量總數」加總
+        - (對應 PDF 第 2 頁「專案聲量分佈」表格)
         
         **頁簽 3 - 總覽整理**
         - 不會被修改(保留模板原樣)
