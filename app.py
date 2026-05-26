@@ -267,26 +267,46 @@ def extract_post_types(pdf_path):
 
 
 def extract_posts_with_content(pdf_path):
-    """從「專案發文總覽 PDF」抽出每篇文章的標題與內文"""
+    """從「專案發文總覽 PDF」抽出每篇文章的標題與內文 (優化修復版)"""
     with pdfplumber.open(pdf_path) as pdf:
         full_text = ""
         for p in pdf.pages:
             full_text += unicodedata.normalize('NFKC', p.extract_text() or '') + "\n"
             
-    title_matches = list(re.finditer(r'title\.標題\s+(.+?)(?=\ncnt\.內文)', full_text, re.DOTALL))
+    # 1. 改用每篇開頭必有的「#數字 RE:」或「■ #數字 RE:」作為切分點
+    #    同時相容可能帶有「title.標題」或直接以「#1 RE」開頭的狀況
+    post_start_pattern = r'(?:title\.標題\s+)?(?=(?:■\s*)?#\d+\s*RE\s*[:：])'
+    
+    # 找到所有文章的起點
+    post_matches = list(re.finditer(post_start_pattern, full_text, re.IGNORECASE))
     
     posts = []
-    for i, m in enumerate(title_matches):
-        title = m.group(1).strip().replace('\n', ' ')
-        start = m.end()
-        next_start = title_matches[i + 1].start() if i + 1 < len(title_matches) else len(full_text)
-        block = full_text[start:next_start]
+    for i, m in enumerate(post_matches):
+        start_pos = m.start()
+        # 下一篇文章的起點，如果是最後一篇則到文本末尾
+        end_pos = post_matches[i + 1].start() if i + 1 < len(post_matches) else len(full_text)
         
-        content_match = re.search(r'cnt\.內文(.*?)(?:\n\s*Time\.發文時間|\n\s*截圖|\Z)', block, re.DOTALL)
+        # 區分出這篇文章的完整區塊
+        block = full_text[start_pos:end_pos]
+        
+        # 2. 擷取標題：從區塊開頭一直到「cnt.內文」或「類型:」或「網址紀錄」之前
+        #    並把可能殘留的 "title.標題" 關鍵字清乾淨
+        title_match = re.search(r'(?:title\.標題\s*)?((?:■\s*)?#\d+\s*RE\s*[:：].*?)(?=\n\s*(?:類型|網址紀錄|文案詳細內容|cnt\.內文|$))', block, re.DOTALL | re.IGNORECASE)
+        if title_match:
+            title = title_match.group(1).strip().replace('\n', ' ')
+        else:
+            # 備援：如果沒抓到，就取第一行非空文字
+            lines = [l.strip() for l in block.split('\n') if l.strip()]
+            title = lines[0] if lines else "未知標題"
+            
+        # 3. 擷取內文：從 cnt.內文 開始，一直到「截圖」或區塊結束
+        content_match = re.search(r'cnt\.內文\s*(.*?)(?:\n\s*截圖|\n\s*Time\.發文時間|\Z)', block, re.DOTALL | re.IGNORECASE)
         content = content_match.group(1).strip() if content_match else ""
         
-        posts.append({"title": title, "content": content})
-        
+        # 只要有標題或有內文就收錄
+        if title or content:
+            posts.append({"title": title, "content": content})
+            
     return posts
 
 
