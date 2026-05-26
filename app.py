@@ -252,6 +252,28 @@ def extract_posts_with_content(pdf_path):
     return posts
 
 
+def normalize_thread_title(title):
+    """把標題去掉 #N RE: 前綴 + 過濾 PDF 圖示字符,得到主討論串名稱
+    
+    例:
+    - "[閒聊] 稻草人 不負責任兇手亂猜"        → "[閒聊] 稻草人 不負責任兇手亂猜"
+    - "#1 RE: [閒聊] 稻草人 不負責任兇手亂猜"  → "[閒聊] 稻草人 不負責任兇手亂猜"
+    - "#3 RE: 心目中的反派演員第一名?"        → "心目中的反派演員第一名?"
+    """
+    if not title:
+        return ""
+    cleaned = title
+    # 移除 PDF 私用區字符(常是字體圖示,如類型標記、編輯按鈕等)
+    cleaned = ''.join(ch for ch in cleaned if not (0xE000 <= ord(ch) <= 0xF8FF))
+    cleaned = cleaned.strip()
+    # 去除「#數字 RE: 」或「RE: 」開頭
+    cleaned = re.sub(r'^#\d+\s*RE:\s*', '', cleaned)
+    cleaned = re.sub(r'^RE:\s*', '', cleaned)
+    # 將內部多重空白統一為單一空白
+    cleaned = re.sub(r'\s+', ' ', cleaned)
+    return cleaned.strip()
+
+
 def search_posts(posts, keyword, search_in="content"):
     """依關鍵字搜尋文章
     
@@ -259,39 +281,71 @@ def search_posts(posts, keyword, search_in="content"):
         posts: extract_posts_with_content() 的回傳
         keyword: 關鍵字,支援:
             - 單一詞: "Friday"
-            - 複合 AND: "Friday+稻草人" (兩者都要出現)
-            - 複合 OR:  "Friday,稻草人" 或 "Friday|稻草人" (任一出現即可)
-        search_in: "content"(內文) 或 "title"(標題)
+            - 複合 AND: "Friday+稻草人"
+            - 複合 OR:  "Friday,稻草人" 或 "Friday|稻草人"
+        search_in: 
+            - "content": 內文 — 每篇獨立計算
+            - "title": 標題 — 同一主討論串視為同一篇
     
-    Returns: 命中文章 list
+    Returns: list of dict, 每筆含 {title, content, snippet_source}
+            (title 模式下,同串多篇會合併成一筆,以主文為代表)
     """
     if not keyword.strip():
         return []
     
-    kw_lower = keyword.strip()
+    kw = keyword.strip()
     
     # 判斷 AND / OR 邏輯
-    if '+' in kw_lower:
-        parts = [k.strip().lower() for k in kw_lower.split('+') if k.strip()]
+    if '+' in kw:
+        parts = [k.strip().lower() for k in kw.split('+') if k.strip()]
         mode = "AND"
-    elif ',' in kw_lower or '|' in kw_lower:
-        parts = [k.strip().lower() for k in re.split(r'[,|]', kw_lower) if k.strip()]
+    elif ',' in kw or '|' in kw:
+        parts = [k.strip().lower() for k in re.split(r'[,|]', kw) if k.strip()]
         mode = "OR"
     else:
-        parts = [kw_lower.lower()]
-        mode = "AND"  # 單一詞時 AND/OR 都一樣
+        parts = [kw.lower()]
+        mode = "AND"
     
-    matched = []
-    for p in posts:
-        target_text = (p["title"] if search_in == "title" else p["content"]).lower()
-        if mode == "AND":
-            if all(k in target_text for k in parts):
-                matched.append(p)
-        else:  # OR
-            if any(k in target_text for k in parts):
-                matched.append(p)
+    def match(text):
+        t = text.lower()
+        return all(k in t for k in parts) if mode == "AND" else any(k in t for k in parts)
     
-    return matched
+    if search_in == "title":
+        # 標題模式:同一主討論串視為同一篇
+        # 把同主討論串文章分組,以主文(或第一篇)為代表
+        from collections import OrderedDict
+        groups = OrderedDict()
+        for p in posts:
+            key = normalize_thread_title(p["title"])
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(p)
+        
+        # 對每組:檢查代表標題是否命中(用 normalize 後的主討論串名稱)
+        matched = []
+        for thread_title, group_posts in groups.items():
+            if match(thread_title):
+                # 用組內第一篇當代表(通常是主文)
+                rep = group_posts[0]
+                matched.append({
+                    "title": thread_title,
+                    "content": rep["content"],
+                    "snippet_source": thread_title,  # 標題模式 snippet 來自標題本身
+                    "thread_size": len(group_posts),
+                })
+        return matched
+    else:
+        # 內文模式:每篇獨立計算
+        matched = []
+        for p in posts:
+            if match(p["content"]):
+                matched.append({
+                    "title": p["title"],
+                    "content": p["content"],
+                    "snippet_source": p["content"],
+                    "thread_size": 1,
+                })
+        return matched
 
 
 
@@ -964,22 +1018,41 @@ if pdf_file:
             if keyword.strip():
                 matched = search_posts(posts, keyword, search_in=search_in_key)
                 
+                # 計算「總篇數」基準 — 標題模式以主討論串為單位
+                if search_in_key == "title":
+                    from collections import OrderedDict
+                    thread_set = OrderedDict()
+                    for p in posts:
+                        key = normalize_thread_title(p["title"])
+                        thread_set[key] = True
+                    total_base = len(thread_set)
+                    base_label = "總討論串數"
+                else:
+                    total_base = len(posts)
+                    base_label = "總篇數"
+                
                 st.divider()
                 st.markdown(f"### 📊 搜尋結果")
                 col_r1, col_r2, col_r3 = st.columns(3)
-                col_r1.metric(f"在「{search_in}」中命中", f"{len(matched)} 篇")
-                col_r2.metric("總篇數", f"{len(posts)} 篇")
-                pct = (len(matched) / len(posts) * 100) if posts else 0
+                unit = "串" if search_in_key == "title" else "篇"
+                col_r1.metric(f"在「{search_in}」中命中", f"{len(matched)} {unit}")
+                col_r2.metric(base_label, f"{total_base} {unit}")
+                pct = (len(matched) / total_base * 100) if total_base else 0
                 col_r3.metric("命中比例", f"{pct:.1f}%")
                 
+                if search_in_key == "title":
+                    st.caption(f"💡 標題模式:同一主討論串(如「#1 RE: XXX」「#2 RE: XXX」)合併為 1 串計算")
+                else:
+                    st.caption(f"💡 內文模式:主文與每篇推文/回應各算 1 篇")
+                
                 if matched:
-                    st.subheader(f"📋 命中文章清單({len(matched)} 篇)")
+                    label_word = "討論串" if search_in_key == "title" else "文章"
+                    st.subheader(f"📋 命中{label_word}清單({len(matched)} {unit})")
                     import pandas as pd
                     rows = []
                     for i, p in enumerate(matched, 1):
-                        # 在內文/標題中找出命中位置,擷取片段
-                        target = p["content"] if search_in_key == "content" else p["title"]
-                        # 取第一個關鍵字(用於擷取上下文)
+                        # 擷取命中片段
+                        target = p["snippet_source"]
                         first_kw = re.split(r'[+,|]', keyword.strip())[0].strip()
                         idx = target.lower().find(first_kw.lower())
                         if idx >= 0:
@@ -988,11 +1061,16 @@ if pdf_file:
                             snippet = ("..." if ctx_start > 0 else "") + target[ctx_start:ctx_end].replace('\n', ' ') + ("..." if ctx_end < len(target) else "")
                         else:
                             snippet = target[:60].replace('\n', ' ') + ("..." if len(target) > 60 else "")
-                        rows.append({
+                        
+                        row = {
                             "#": i,
                             "標題": p["title"][:50],
                             f"{search_in}命中片段": snippet,
-                        })
+                        }
+                        # 標題模式:多顯示「該串包含幾篇」
+                        if search_in_key == "title" and p.get("thread_size", 1) > 1:
+                            row["該串文章數"] = p["thread_size"]
+                        rows.append(row)
                     df_results = pd.DataFrame(rows)
                     st.dataframe(df_results, use_container_width=True, hide_index=True)
                     
