@@ -96,23 +96,74 @@ ROW_PATTERN = re.compile(
 
 
 def get_main_category_from_pdf(pdf_path):
-    """從 PDF 第 3 頁的「操作主軸」表抽出實際主軸全名,建立縮寫到全名的對應"""
-    extracted = {}
+    """從 PDF「操作主軸」區塊抽出實際主軸全名清單(用文字解析,避免跨頁切表問題)"""
     with pdfplumber.open(pdf_path) as pdf:
+        full_text = ""
         for page in pdf.pages:
-            for table in page.extract_tables():
-                if not table:
-                    continue
-                head = [normalize(c) for c in table[0]] if table[0] else []
-                # 「操作主軸」表的特徵:第一列 ['類型', '累計']
-                if "類型" in head and "累計" in head:
-                    for row in table[1:]:
-                        if len(row) >= 2 and row[0]:
-                            name = normalize(row[0])
-                            if name and name != "合計":
-                                # 取第一個字當縮寫
-                                extracted[name[0]] = name
+            full_text += unicodedata.normalize('NFKC', page.extract_text() or "") + "\n"
+    
+    extracted = []
+    
+    # 找「操作主軸」區段
+    start_idx = full_text.find("操作主軸")
+    if start_idx < 0:
+        return extracted
+    
+    # 找區段結尾(碰到下個區段就停)
+    end_markers = ["專案聲量分佈", "網友關注度", "網友回應概況"]
+    end_idx = len(full_text)
+    for marker in end_markers:
+        idx = full_text.find(marker, start_idx + 10)
+        if 0 < idx < end_idx:
+            end_idx = idx
+    
+    section = full_text[start_idx:end_idx]
+    
+    # 匹配「主軸名 + 空白 + 純數字」
+    for line in section.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        if line in ("操作主軸", "類型 累計", "類型", "累計"):
+            continue
+        m = re.match(r'^(.+?)\s+(\d+)\s*$', line)
+        if m:
+            name = m.group(1).strip()
+            if name == "合計":
+                continue
+            # 排除站版列、含百分比的列
+            if ":" in name or "%" in name:
+                continue
+            if re.search(r'\d+\.\d+', line):
+                continue
+            extracted.append(name)
+    
     return extracted
+
+
+def resolve_main_category(prefix, full_names):
+    """把截斷的主軸縮寫對應到完整名稱
+    
+    優先級:
+    1. 完全相同
+    2. 完整名稱開頭就是縮寫(prefix match)
+    3. 無法對應 → 回傳原縮寫
+    """
+    if not prefix:
+        return prefix
+    # 1. 完全相同
+    for name in full_names:
+        if name == prefix:
+            return name
+    # 2. 開頭匹配(全名以縮寫開頭)
+    for name in full_names:
+        if name.startswith(prefix):
+            return name
+    # 3. 反向匹配(縮寫以全名開頭,例如「全院-逆時針」會出現「全院-逆」被截斷)
+    for name in full_names:
+        if prefix.startswith(name) and len(name) >= 2:
+            return name
+    return prefix
 
 
 def extract_main_table_via_text(pdf_path):
@@ -128,9 +179,8 @@ def extract_main_table_via_text(pdf_path):
             page_text = page.extract_text() or ""
             full_text += unicodedata.normalize('NFKC', page_text) + "\n"
     
-    # 從 PDF 第 3 頁的「操作主軸」表抓主軸全名(動態對照)
-    dynamic_mapping = get_main_category_from_pdf(pdf_path)
-    mapping = {**主軸縮寫對照, **dynamic_mapping}
+    # 從 PDF「操作主軸」表抓主軸全名清單(動態,不寫死)
+    full_names = get_main_category_from_pdf(pdf_path)
     
     rows = []
     for m in ROW_PATTERN.finditer(full_text):
@@ -141,14 +191,16 @@ def extract_main_table_via_text(pdf_path):
         line_start = full_text.rfind('\n', 0, m.start()) + 1
         line_part = full_text[line_start:m.start()].strip()
         
-        # 過濾:行首不能是純數字(避免抓到「合計」之類的列被誤判)
-        # 合計列開頭是「合計」,且後面沒有主軸縮寫前綴 → 不會匹配 ROW_PATTERN
-        # 但保險起見再加一道過濾:行內容如果完全沒有站版字串(空字串/太短)就跳過
+        # 過濾:行內容太短就跳過(避免抓到合計列等)
         if len(line_part) < 3:
             continue
         
-        # 對應主軸全名(找不到就用縮寫本身)
-        主軸全名 = mapping.get(主軸縮寫, 主軸縮寫)
+        # 把可能截斷的主軸縮寫對應到完整名稱
+        # 優先使用 PDF「操作主軸」表的全名清單做 prefix match
+        # 查不到再用內建對照表;都查不到就用原縮寫
+        主軸全名 = resolve_main_category(主軸縮寫, full_names)
+        if 主軸全名 == 主軸縮寫 and 主軸縮寫 in 主軸縮寫對照:
+            主軸全名 = 主軸縮寫對照[主軸縮寫]
         
         rows.append({
             "站版": line_part,
