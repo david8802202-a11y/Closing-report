@@ -858,4 +858,70 @@ if pdf_file:
                             row["該串包含文章數"] = p["thread_size"]
                         rows.append(row)
                     df_results = pd.DataFrame(rows)
-                    st.dataframe(df_results, use_container_width=True,
+                    st.dataframe(df_results, use_container_width=True, hide_index=True)
+                    
+                    csv_data = df_results.to_csv(index=False).encode('utf-8-sig')
+                    st.download_button(
+                        "📥 下載命中清單(CSV)",
+                        data=csv_data,
+                        file_name=f"內文指名度_{keyword.replace('+','_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv",
+                    )
+                else:
+                    st.info("沒有任何文章轉換符合此關鍵字條件")
+            else:
+                st.info("👆 請於上方輸入關鍵字以執行指名度查詢")
+                
+        # ===== 分支:報表填充功能 =====
+        else:
+            try:
+                template_bytes = get_builtin_template(report_type)
+            except Exception as e:
+                st.error(f"❌ 載入內建模板失敗: {e}")
+                st.stop()
+                
+            with st.spinner("🔍 解析 PDF 並計算數據..."):
+                main_data = extract_main_table(pdf_path)
+                post_types = extract_post_types(pdf_path)
+                
+            if not main_data:
+                st.error("❌ 無法從 PDF 抽取主表資料,請確認上傳格式。")
+                st.stop()
+                
+            st.success(f"✅ 解析成功!共抓到 **{len(main_data)}** 筆資料")
+            
+            st.subheader("👀 預覽計算結果")
+            if report_type == "結案表":
+                result = calculate_all(main_data, post_types)
+                _render_closure_preview(result, main_data, post_types)
+            else:
+                _render_monthly_preview(main_data, post_types)
+                
+            st.divider()
+            
+            with st.spinner("📝 填入模板..."):
+                try:
+                    if report_type == "月報表":
+                        filled_bytes = fill_monthly_template(BytesIO(template_bytes), main_data, post_types)
+                    else:
+                        filled_bytes = fill_template(BytesIO(template_bytes), result)
+                except Exception as e:
+                    st.error(f"❌ 填入模板失敗: {e}")
+                    st.stop()
+                    
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            out_name = f"{report_type}_已填_{timestamp}.xlsx"
+            
+            st.download_button(
+                label=f"📥 下載填好的 {report_type}",
+                data=filled_bytes,
+                file_name=out_name,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                type="primary",
+            )
+    finally:
+        if os.path.exists(pdf_path):
+            os.unlink(pdf_path)
+else:
+    st.info("👆 請選擇功能並上傳對應 PDF 報告檔案以開始執行。")
