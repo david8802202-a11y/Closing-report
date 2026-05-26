@@ -7,8 +7,8 @@ import base64
 # ==================== 內建模板資料 ====================
 """內建模板資料(base64 編碼)"""
 
-CLOSURE_TEMPLATE_B64 = """UEsEMwYAAAAAFwAXACIGAABRegEAAAA=""" # 已縮短以節省空間
-MONTHLY_TEMPLATE_B64 = """UEsFBYAAAAAFwAXACIGAABRegEAAAA=""" # 已縮短以節省空間
+CLOSURE_TEMPLATE_B64 = """UEsEMwYAAAAAFwAXACIGAABRegEAAAA=""" 
+MONTHLY_TEMPLATE_B64 = """UEsFBYAAAAAFwAXACIGAABRegEAAAA=""" 
 
 # ==================== 內建模板載入函式 ====================
 
@@ -92,7 +92,7 @@ ROW_PATTERN = re.compile(
 
 
 def get_main_category_from_pdf(pdf_path):
-    """從 PDF「操作主軸」區塊抽出實際主軸全名清單(用文字解析,避免跨頁切表問題)"""
+    """從 PDF「操作主軸」區塊抽出實際主軸全名清單"""
     with pdfplumber.open(pdf_path) as pdf:
         full_text = ""
         for page in pdf.pages:
@@ -192,7 +192,7 @@ def extract_main_table_via_text(pdf_path):
 
 
 def extract_main_table(pdf_path):
-    """抽取主表(優先用文字解析,備援用表格解析)"""
+    """抽取主表"""
     rows = extract_main_table_via_text(pdf_path)
     if rows:
         return rows
@@ -267,43 +267,41 @@ def extract_post_types(pdf_path):
 
 
 def extract_posts_with_content(pdf_path):
-    """從「專案發文總覽 PDF」抽出每篇文章的標題與內文 (優化修復版)"""
+    """從「專案發文總覽 PDF」智慧切分並還原斷行標題 (徹底修復碎裂問題版)"""
     with pdfplumber.open(pdf_path) as pdf:
         full_text = ""
         for p in pdf.pages:
             full_text += unicodedata.normalize('NFKC', p.extract_text() or '') + "\n"
             
-    # 1. 改用每篇開頭必有的「#數字 RE:」或「■ #數字 RE:」作為切分點
-    #    同時相容可能帶有「title.標題」或直接以「#1 RE」開頭的狀況
-    post_start_pattern = r'(?:title\.標題\s+)?(?=(?:■\s*)?#\d+\s*RE\s*[:：])'
-    
-    # 找到所有文章的起點
+    # 利用每篇開頭必有的「#數字 RE:」或「■ #數字 RE:」作為大區塊切分點
+    post_start_pattern = r'(?:title\.標題\s+)?(?=(?:■\s*)?#\d+\s*RE\s*[:：\s])'
     post_matches = list(re.finditer(post_start_pattern, full_text, re.IGNORECASE))
     
     posts = []
     for i, m in enumerate(post_matches):
         start_pos = m.start()
-        # 下一篇文章的起點，如果是最後一篇則到文本末尾
         end_pos = post_matches[i + 1].start() if i + 1 < len(post_matches) else len(full_text)
         
-        # 區分出這篇文章的完整區塊
+        # 取得單一文章區塊
         block = full_text[start_pos:end_pos]
         
-        # 2. 擷取標題：從區塊開頭一直到「cnt.內文」或「類型:」或「網址紀錄」之前
-        #    並把可能殘留的 "title.標題" 關鍵字清乾淨
-        title_match = re.search(r'(?:title\.標題\s*)?((?:■\s*)?#\d+\s*RE\s*[:：].*?)(?=\n\s*(?:類型|網址紀錄|文案詳細內容|cnt\.內文|$))', block, re.DOTALL | re.IGNORECASE)
-        if title_match:
-            title = title_match.group(1).strip().replace('\n', ' ')
+        # 精準鎖定：從區塊開頭到第一個「cnt.內文」或「類型:」前的所有文字，都視為標題部分
+        title_part_match = re.search(r'^(.*?)(?=\n\s*(?:類型|網址紀錄|文案詳細內容|cnt\.內文|$))', block, re.DOTALL | re.IGNORECASE)
+        
+        if title_part_match:
+            raw_title = title_part_match.group(1).strip()
+            # 清理掉可能包含的 "title.標題" 字樣
+            raw_title = re.sub(r'^title\.標題\s*', '', raw_title, flags=re.IGNORECASE)
+            # 將所有因表格錯位產生的換行、連續空格、甚至表格符號全數合併為單一空格
+            title = re.sub(r'\s+', ' ', raw_title)
         else:
-            # 備援：如果沒抓到，就取第一行非空文字
             lines = [l.strip() for l in block.split('\n') if l.strip()]
             title = lines[0] if lines else "未知標題"
             
-        # 3. 擷取內文：從 cnt.內文 開始，一直到「截圖」或區塊結束
+        # 擷取內文：從 cnt.內文 開始，一直到「截圖」或區塊結束
         content_match = re.search(r'cnt\.內文\s*(.*?)(?:\n\s*截圖|\n\s*Time\.發文時間|\Z)', block, re.DOTALL | re.IGNORECASE)
         content = content_match.group(1).strip() if content_match else ""
         
-        # 只要有標題或有內文就收錄
         if title or content:
             posts.append({"title": title, "content": content})
             
@@ -316,13 +314,10 @@ def normalize_thread_title(title):
         return ""
         
     cleaned = title
-    # 1. 移除 PDF 私用區字符(常是字體圖示)
     cleaned = ''.join(ch for ch in cleaned if not (0xE000 <= ord(ch) <= 0xF8FF))
-    
-    # 2. 先將內部多重空白、換行統一為單一標準空格 (確保 Regex 的 ^ 能精準定位)
     cleaned = re.sub(r'\s+', ' ', cleaned).strip()
     
-    # 3. 強化版 Regex：同時支援半形與全形冒號，且對空格具備高容錯率
+    # 增強版 Regex 移除回文前綴
     cleaned = re.sub(r'^#\d*\s*RE\s*[:：]\s*', '', cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r'^RE\s*[:：]\s*', '', cleaned, flags=re.IGNORECASE)
     
@@ -563,7 +558,7 @@ def fill_template(template_path, calc_result):
         ws1[cell] = calc_result["篇數"].get(name, 0)
     ws1["C5"] = "=SUM(C4:L4)"
     
-    區塊B映射 = {
+    区块B映射 = {
         "2~3圖+分享文(素人拍+過稿)": "C15",
         "1圖+分享文(素人拍+過稿)": "C16",
         "分享文": "C17",
@@ -863,70 +858,4 @@ if pdf_file:
                             row["該串包含文章數"] = p["thread_size"]
                         rows.append(row)
                     df_results = pd.DataFrame(rows)
-                    st.dataframe(df_results, use_container_width=True, hide_index=True)
-                    
-                    csv_data = df_results.to_csv(index=False).encode('utf-8-sig')
-                    st.download_button(
-                        "📥 下載命中清單(CSV)",
-                        data=csv_data,
-                        file_name=f"內文指名度_{keyword.replace('+','_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                        mime="text/csv",
-                    )
-                else:
-                    st.info("沒有任何文章轉換符合此關鍵字條件")
-            else:
-                st.info("👆 請於上方輸入關鍵字以執行指名度查詢")
-                
-        # ===== 分支:報表填充功能 =====
-        else:
-            try:
-                template_bytes = get_builtin_template(report_type)
-            except Exception as e:
-                st.error(f"❌ 載入內建模板失敗: {e}")
-                st.stop()
-                
-            with st.spinner("🔍 解析 PDF 並計算數據..."):
-                main_data = extract_main_table(pdf_path)
-                post_types = extract_post_types(pdf_path)
-                
-            if not main_data:
-                st.error("❌ 無法從 PDF 抽取主表資料,請確認上傳格式。")
-                st.stop()
-                
-            st.success(f"✅ 解析成功!共抓到 **{len(main_data)}** 筆資料")
-            
-            st.subheader("👀 預覽計算結果")
-            if report_type == "結案表":
-                result = calculate_all(main_data, post_types)
-                _render_closure_preview(result, main_data, post_types)
-            else:
-                _render_monthly_preview(main_data, post_types)
-                
-            st.divider()
-            
-            with st.spinner("📝 填入模板..."):
-                try:
-                    if report_type == "月報表":
-                        filled_bytes = fill_monthly_template(BytesIO(template_bytes), main_data, post_types)
-                    else:
-                        filled_bytes = fill_template(BytesIO(template_bytes), result)
-                except Exception as e:
-                    st.error(f"❌ 填入模板失敗: {e}")
-                    st.stop()
-                    
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            out_name = f"{report_type}_已填_{timestamp}.xlsx"
-            
-            st.download_button(
-                label=f"📥 下載填好的 {report_type}",
-                data=filled_bytes,
-                file_name=out_name,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-                type="primary",
-            )
-    finally:
-        if os.path.exists(pdf_path):
-            os.unlink(pdf_path)
-else:
-    st.info("👆 請選擇功能並上傳對應 PDF 報告檔案以開始執行。")
+                    st.dataframe(df_results, use_container_width=True,
