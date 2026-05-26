@@ -861,7 +861,7 @@ with st.sidebar:
         - 回應小計 = 公式自動計算
         - 未列出的版面 → 併入「其他版面」
         """)
-    else:
+    elif report_type == "月報表":
         st.markdown("""
         **【月報表】填充規則**
         
@@ -875,7 +875,9 @@ with st.sidebar:
         
         **頁簽 3 - 總覽整理**
         - 不會被修改(保留模板原樣)
-        """) if report_type == "月報表" else st.markdown("""
+        """)
+    else:  # 內文指名度查詢
+        st.markdown("""
         **【內文指名度查詢】使用說明**
         
         1. 上傳「專案發文總覽 PDF」
