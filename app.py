@@ -285,9 +285,20 @@ def extract_posts_with_content(pdf_path):
         # 取得單一文章區塊文本
         block = full_text[start_pos:end_pos]
         
-        # 鎖定標題範圍：從區塊開頭到第一個「cnt.內文」或「類型:」等關鍵字前的所有文字碎片
-        title_part_match = re.search(r'^(.*?)(?=\n\s*(?:類型|網址紀錄|文案詳細內容|cnt\.內文|$))', block, re.DOTALL | re.IGNORECASE)
+       # 鎖定標題範圍：嚴格限制只抓到第一行或前幾行，直到碰到「類型:」或其他系統標記為止
+        # 我們加入了 (?=...) 前瞻斷言，確保我們只抓取「真正屬於標題的文字」
+        title_pattern = r'^(?:■\s*)?#\d+\s*RE\s*[:：]\s*(.*?)(?=\n\s*(?:類型|標記|編輯|★編輯|價格評價|通路評價|服務評價|主體評價|其他評價|網址紀錄|文案詳細內容|cnt\.內文|$))'
+        title_part_match = re.search(title_pattern, block, re.DOTALL | re.IGNORECASE)
         
+        if title_part_match:
+            raw_title = title_part_match.group(1).strip()
+            # 將所有因表格錯位產生的換行與多重空白，合併為單一標準空格
+            title = re.sub(r'\s+', ' ', raw_title)
+        else:
+            # 備援機制：如果上述邏輯沒抓到，取第一行並強制截斷
+            lines = [l.strip() for l in block.split('\n') if l.strip()]
+            title = lines[0].split('類型:')[0].split('標記:')[0].strip() if lines else "未知標題"
+            
         if title_part_match:
             raw_title = title_part_match.group(1).strip()
             # 抹除可能包含的 "title.標題" 關鍵字
