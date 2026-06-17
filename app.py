@@ -96,23 +96,74 @@ ROW_PATTERN = re.compile(
 
 
 def get_main_category_from_pdf(pdf_path):
-    """從 PDF 第 3 頁的「操作主軸」表抽出實際主軸全名,建立縮寫到全名的對應"""
-    extracted = {}
+    """從 PDF「操作主軸」區塊抽出實際主軸全名清單(用文字解析,避免跨頁切表問題)"""
     with pdfplumber.open(pdf_path) as pdf:
+        full_text = ""
         for page in pdf.pages:
-            for table in page.extract_tables():
-                if not table:
-                    continue
-                head = [normalize(c) for c in table[0]] if table[0] else []
-                # 「操作主軸」表的特徵:第一列 ['類型', '累計']
-                if "類型" in head and "累計" in head:
-                    for row in table[1:]:
-                        if len(row) >= 2 and row[0]:
-                            name = normalize(row[0])
-                            if name and name != "合計":
-                                # 取第一個字當縮寫
-                                extracted[name[0]] = name
+            full_text += unicodedata.normalize('NFKC', page.extract_text() or "") + "\n"
+    
+    extracted = []
+    
+    # 找「操作主軸」區段
+    start_idx = full_text.find("操作主軸")
+    if start_idx < 0:
+        return extracted
+    
+    # 找區段結尾(碰到下個區段就停)
+    end_markers = ["專案聲量分佈", "網友關注度", "網友回應概況"]
+    end_idx = len(full_text)
+    for marker in end_markers:
+        idx = full_text.find(marker, start_idx + 10)
+        if 0 < idx < end_idx:
+            end_idx = idx
+    
+    section = full_text[start_idx:end_idx]
+    
+    # 匹配「主軸名 + 空白 + 純數字」
+    for line in section.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        if line in ("操作主軸", "類型 累計", "類型", "累計"):
+            continue
+        m = re.match(r'^(.+?)\s+(\d+)\s*$', line)
+        if m:
+            name = m.group(1).strip()
+            if name == "合計":
+                continue
+            # 排除站版列、含百分比的列
+            if ":" in name or "%" in name:
+                continue
+            if re.search(r'\d+\.\d+', line):
+                continue
+            extracted.append(name)
+    
     return extracted
+
+
+def resolve_main_category(prefix, full_names):
+    """把截斷的主軸縮寫對應到完整名稱
+    
+    優先級:
+    1. 完全相同
+    2. 完整名稱開頭就是縮寫(prefix match)
+    3. 無法對應 → 回傳原縮寫
+    """
+    if not prefix:
+        return prefix
+    # 1. 完全相同
+    for name in full_names:
+        if name == prefix:
+            return name
+    # 2. 開頭匹配(全名以縮寫開頭)
+    for name in full_names:
+        if name.startswith(prefix):
+            return name
+    # 3. 反向匹配(縮寫以全名開頭,例如「全院-逆時針」會出現「全院-逆」被截斷)
+    for name in full_names:
+        if prefix.startswith(name) and len(name) >= 2:
+            return name
+    return prefix
 
 
 def extract_main_table_via_text(pdf_path):
@@ -128,9 +179,8 @@ def extract_main_table_via_text(pdf_path):
             page_text = page.extract_text() or ""
             full_text += unicodedata.normalize('NFKC', page_text) + "\n"
     
-    # 從 PDF 第 3 頁的「操作主軸」表抓主軸全名(動態對照)
-    dynamic_mapping = get_main_category_from_pdf(pdf_path)
-    mapping = {**主軸縮寫對照, **dynamic_mapping}
+    # 從 PDF「操作主軸」表抓主軸全名清單(動態,不寫死)
+    full_names = get_main_category_from_pdf(pdf_path)
     
     rows = []
     for m in ROW_PATTERN.finditer(full_text):
@@ -141,14 +191,16 @@ def extract_main_table_via_text(pdf_path):
         line_start = full_text.rfind('\n', 0, m.start()) + 1
         line_part = full_text[line_start:m.start()].strip()
         
-        # 過濾:行首不能是純數字(避免抓到「合計」之類的列被誤判)
-        # 合計列開頭是「合計」,且後面沒有主軸縮寫前綴 → 不會匹配 ROW_PATTERN
-        # 但保險起見再加一道過濾:行內容如果完全沒有站版字串(空字串/太短)就跳過
+        # 過濾:行內容太短就跳過(避免抓到合計列等)
         if len(line_part) < 3:
             continue
         
-        # 對應主軸全名(找不到就用縮寫本身)
-        主軸全名 = mapping.get(主軸縮寫, 主軸縮寫)
+        # 把可能截斷的主軸縮寫對應到完整名稱
+        # 優先使用 PDF「操作主軸」表的全名清單做 prefix match
+        # 查不到再用內建對照表;都查不到就用原縮寫
+        主軸全名 = resolve_main_category(主軸縮寫, full_names)
+        if 主軸全名 == 主軸縮寫 and 主軸縮寫 in 主軸縮寫對照:
+            主軸全名 = 主軸縮寫對照[主軸縮寫]
         
         rows.append({
             "站版": line_part,
@@ -168,7 +220,140 @@ def extract_main_table_via_text(pdf_path):
 
 
 def extract_main_table(pdf_path):
-    """抽取主表(優先用文字解析,備援用表格解析)"""
+    """主表抽取的對外接口(目前用文字解析法,最穩定)"""
+    return extract_main_table_via_text(pdf_path)
+
+
+def extract_posts_with_content(pdf_path):
+    """從「專案發文總覽 PDF」抽出每篇文章的 title.標題 + cnt.內文
+    
+    結構特徵:
+    - 每篇文章都有 「title.標題 {標題}\ncnt.內文 {內文} ... Time.發文時間/截圖」
+    - 內文可能跨多頁
+    """
+    with pdfplumber.open(pdf_path) as pdf:
+        full_text = ""
+        for p in pdf.pages:
+            full_text += unicodedata.normalize('NFKC', p.extract_text() or '') + "\n"
+    
+    # 用 title.標題 當錨點切分每篇
+    title_matches = list(re.finditer(r'title\.標題\s+(.+?)(?=\ncnt\.內文)', full_text, re.DOTALL))
+    
+    posts = []
+    for i, m in enumerate(title_matches):
+        title = m.group(1).strip().replace('\n', ' ')
+        
+        # 該篇從 cnt.內文 開始,到下一個 title.標題 結束
+        start = m.end()
+        next_start = title_matches[i + 1].start() if i + 1 < len(title_matches) else len(full_text)
+        block = full_text[start:next_start]
+        
+        # 內文:cnt.內文 後面 → 直到 Time.發文時間 / 截圖 / 下一篇
+        content_match = re.search(r'cnt\.內文(.*?)(?:\n\s*Time\.發文時間|\n\s*截圖|\Z)', block, re.DOTALL)
+        content = content_match.group(1).strip() if content_match else ""
+        
+        posts.append({"title": title, "content": content})
+    
+    return posts
+
+
+def normalize_thread_title(title):
+    """把標題去掉 #N RE: 前綴 + 過濾 PDF 圖示字符,得到主討論串名稱
+    
+    例:
+    - "[閒聊] 稻草人 不負責任兇手亂猜"        → "[閒聊] 稻草人 不負責任兇手亂猜"
+    - "#1 RE: [閒聊] 稻草人 不負責任兇手亂猜"  → "[閒聊] 稻草人 不負責任兇手亂猜"
+    - "#3 RE: 心目中的反派演員第一名?"        → "心目中的反派演員第一名?"
+    """
+    if not title:
+        return ""
+    cleaned = title
+    # 移除 PDF 私用區字符(常是字體圖示,如類型標記、編輯按鈕等)
+    cleaned = ''.join(ch for ch in cleaned if not (0xE000 <= ord(ch) <= 0xF8FF))
+    cleaned = cleaned.strip()
+    # 去除「#數字 RE: 」或「RE: 」開頭
+    cleaned = re.sub(r'^#\d+\s*RE:\s*', '', cleaned)
+    cleaned = re.sub(r'^RE:\s*', '', cleaned)
+    # 將內部多重空白統一為單一空白
+    cleaned = re.sub(r'\s+', ' ', cleaned)
+    return cleaned.strip()
+
+
+def search_posts(posts, keyword, search_in="content"):
+    """依關鍵字搜尋文章
+    
+    Args:
+        posts: extract_posts_with_content() 的回傳
+        keyword: 關鍵字,支援:
+            - 單一詞: "Friday"
+            - 複合 AND: "Friday+稻草人"
+            - 複合 OR:  "Friday,稻草人" 或 "Friday|稻草人"
+        search_in: 
+            - "content": 內文 — 每篇獨立計算
+            - "title": 標題 — 同一主討論串視為同一篇
+    
+    Returns: list of dict, 每筆含 {title, content, snippet_source}
+            (title 模式下,同串多篇會合併成一筆,以主文為代表)
+    """
+    if not keyword.strip():
+        return []
+    
+    kw = keyword.strip()
+    
+    # 判斷 AND / OR 邏輯
+    if '+' in kw:
+        parts = [k.strip().lower() for k in kw.split('+') if k.strip()]
+        mode = "AND"
+    elif ',' in kw or '|' in kw:
+        parts = [k.strip().lower() for k in re.split(r'[,|]', kw) if k.strip()]
+        mode = "OR"
+    else:
+        parts = [kw.lower()]
+        mode = "AND"
+    
+    def match(text):
+        t = text.lower()
+        return all(k in t for k in parts) if mode == "AND" else any(k in t for k in parts)
+    
+    if search_in == "title":
+        # 標題模式:同一主討論串視為同一篇
+        # 把同主討論串文章分組,以主文(或第一篇)為代表
+        from collections import OrderedDict
+        groups = OrderedDict()
+        for p in posts:
+            key = normalize_thread_title(p["title"])
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(p)
+        
+        # 對每組:檢查代表標題是否命中(用 normalize 後的主討論串名稱)
+        matched = []
+        for thread_title, group_posts in groups.items():
+            if match(thread_title):
+                # 用組內第一篇當代表(通常是主文)
+                rep = group_posts[0]
+                matched.append({
+                    "title": thread_title,
+                    "content": rep["content"],
+                    "snippet_source": thread_title,  # 標題模式 snippet 來自標題本身
+                    "thread_size": len(group_posts),
+                })
+        return matched
+    else:
+        # 內文模式:每篇獨立計算
+        matched = []
+        for p in posts:
+            if match(p["content"]):
+                matched.append({
+                    "title": p["title"],
+                    "content": p["content"],
+                    "snippet_source": p["content"],
+                    "thread_size": 1,
+                })
+        return matched
+
+
+
     # 文字解析法:更穩健,能避免 pdfplumber 跨頁切錯
     rows = extract_main_table_via_text(pdf_path)
     if rows:
@@ -420,6 +605,18 @@ def fill_monthly_template(template_path, main_data, post_types):
     ws1["C12"] = f"{pct(sum_prod)}% / {sum_prod}篇"
     ws1["C13"] = f"{pct(sum_topic)}% / {sum_topic}篇"
     
+    # 5 個討論類型的「篇數=0」整列刪除(從底部往上刪,避免列號錯位)
+    discussion_rows = [
+        (13, sum_topic),   # 議題
+        (12, sum_prod),    # 產品
+        (11, sum_combo),   # 複合
+        (10, sum_neg),     # 負面
+        (9, sum_pos),      # 正面
+    ]
+    for row_num, count in discussion_rows:
+        if count == 0:
+            ws1.delete_rows(row_num)
+    
     # ----- 頁簽 2:版面佔比 -----
     ws2 = wb["版面佔比"]
     # 模板已有的:B10 PTT / B11 DCARD / B12 THREAD / B13 其他版面
@@ -511,14 +708,15 @@ def fill_template(template_path, calc_result):
     # ----- 工作表 3:網友回應分布 -----
     ws3 = wb["網友回應分布"]
     # 列對應(已知模板:PTT=5列, Dcard=6列, Threads=7列, 其他=8列, FB=9列)
-    版面列對應 = {
-        "PTT": 5,
-        "Dcard": 6,
-        "Threads": 7,
-        "其他版面": 8,
-        "FB社團": 9,
-    }
-    for cat, row_num in 版面列對應.items():
+    版面列對應 = [
+        ("PTT", 5),
+        ("Dcard", 6),
+        ("Threads", 7),
+        ("其他版面", 8),
+        ("FB社團", 9),
+    ]
+    # 先填值
+    for cat, row_num in 版面列對應:
         d = calc_result["分布"][cat]
         ws3.cell(row=row_num, column=3).value = d["實際溝通"]   # C
         ws3.cell(row=row_num, column=4).value = d["正面討論"]   # D
@@ -526,9 +724,23 @@ def fill_template(template_path, calc_result):
         ws3.cell(row=row_num, column=6).value = d["議題討論"]   # F
         ws3.cell(row=row_num, column=7).value = d["產品討論"]   # G
         ws3.cell(row=row_num, column=8).value = d["複合討論"]   # H
-        # I 欄(回應小計)= 正+負+議+產+複,用公式自動計算
+        # I 欄(回應小計)用公式
         ws3.cell(row=row_num, column=9).value = f"=SUM(D{row_num}:H{row_num})"
-    # 第 14 列「發文篇數總計」模板已內建公式 =SUM(C5:C13) 等,不需另外處理
+    
+    # 從底部往上刪「整列全為 0」的版面(避免列號錯位)
+    for cat, row_num in reversed(版面列對應):
+        d = calc_result["分布"][cat]
+        all_zero = (
+            d["實際溝通"] == 0
+            and d["正面討論"] == 0
+            and d["負面討論"] == 0
+            and d["議題討論"] == 0
+            and d["產品討論"] == 0
+            and d["複合討論"] == 0
+        )
+        if all_zero:
+            ws3.delete_rows(row_num)
+    # 第 14 列「發文篇數總計」模板已內建公式,刪除上面的列後 Excel 會自動調整公式參照
     
     # 輸出到 bytes
     output = BytesIO()
@@ -704,14 +916,14 @@ def _render_monthly_preview(main_data, post_types):
 st.title("📊 PDF → 報表填充器")
 st.caption("上傳銀河 PDF + Excel 模板,自動算出對應數字並填入")
 
-# === Step 1:選擇報表類型 ===
-st.subheader("🎯 選擇要產生的報表")
+# === Step 1:選擇功能 ===
+st.subheader("🎯 選擇要使用的功能")
 report_type = st.radio(
-    "報表類型",
-    ["結案表", "月報表"],
+    "功能類型",
+    ["結案表", "月報表", "內文指名度查詢"],
     horizontal=True,
     key="report_type",
-    help="兩種表格格式不同,請依需求選擇"
+    help="前兩個會產出 Excel,第三個是查詢工具"
 )
 
 with st.sidebar:
@@ -735,7 +947,7 @@ with st.sidebar:
         - 回應小計 = 公式自動計算
         - 未列出的版面 → 併入「其他版面」
         """)
-    else:
+    elif report_type == "月報表":
         st.markdown("""
         **【月報表】填充規則**
         
@@ -750,12 +962,33 @@ with st.sidebar:
         **頁簽 3 - 總覽整理**
         - 不會被修改(保留模板原樣)
         """)
+    else:  # 內文指名度查詢
+        st.markdown("""
+        **【內文指名度查詢】使用說明**
+        
+        1. 上傳「專案發文總覽 PDF」
+        2. 輸入關鍵字
+        3. 選擇要搜尋「內文」或「標題」
+        4. 顯示符合篇數 + 命中列表
+        
+        **關鍵字語法**
+        - 單一詞: `Friday`
+        - AND(都要含): `Friday+稻草人`
+        - OR(任一含): `Friday,稻草人`
+        
+        **特性**
+        - 大小寫不分(Friday=friday=FRIDAY)
+        - 結果不會寫入任何 Excel
+        """)
 
 st.divider()
 
 # === Step 2:上傳 PDF ===
 st.subheader("📤 上傳 PDF 報表")
-st.caption("✨ 模板已內建,直接上傳 PDF 即可")
+if report_type == "內文指名度查詢":
+    st.caption("✨ 請上傳「專案發文總覽 PDF」(含 cnt.內文 欄位的版本)")
+else:
+    st.caption("✨ 模板已內建,直接上傳 PDF 即可")
 
 pdf_file = st.file_uploader(
     "銀河專案 PDF",
@@ -766,73 +999,193 @@ pdf_file = st.file_uploader(
 if pdf_file:
     st.divider()
     
-    # 從內建資料取得對應模板
-    try:
-        template_bytes = get_builtin_template(report_type)
-    except Exception as e:
-        st.error(f"❌ 載入內建模板失敗: {e}")
-        st.stop()
-    
     # 把 PDF 存到暫存檔
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
         tmp_pdf.write(pdf_file.getvalue())
         pdf_path = tmp_pdf.name
     
     try:
-        with st.spinner("🔍 解析 PDF 並計算數據..."):
-            main_data = extract_main_table(pdf_path)
-            post_types = extract_post_types(pdf_path)
-        
-        if not main_data:
-            st.error("❌ 無法從 PDF 抽取主表資料,請確認上傳的是正確格式的銀河專案 PDF")
-            st.stop()
-        
-        st.success(f"✅ 解析成功!共抓到 **{len(main_data)}** 篇文章資料")
-        
-        # ===== 預覽計算結果 =====
-        st.subheader("👀 預覽計算結果")
-        
-        if report_type == "結案表":
-            result = calculate_all(main_data, post_types)
-            _render_closure_preview(result, main_data, post_types)
-        else:
-            _render_monthly_preview(main_data, post_types)
-        
-        st.divider()
-        
-        # ===== 產生並下載填好的 Excel =====
-        with st.spinner("📝 填入模板..."):
-            try:
-                if report_type == "月報表":
-                    filled_bytes = fill_monthly_template(BytesIO(template_bytes), main_data, post_types)
-                else:
-                    filled_bytes = fill_template(BytesIO(template_bytes), result)
-            except Exception as e:
-                st.error(f"❌ 填入模板失敗: {e}")
-                import traceback
-                st.code(traceback.format_exc())
+        # =============================
+        # 分支:內文指名度查詢(獨立工具)
+        # =============================
+        if report_type == "內文指名度查詢":
+            with st.spinner("🔍 解析 PDF 文章..."):
+                posts = extract_posts_with_content(pdf_path)
+            
+            if not posts:
+                st.error("❌ 無法從 PDF 抽出文章。請確認上傳的是『專案發文總覽』PDF(內含 cnt.內文 欄位)")
                 st.stop()
+            
+            st.success(f"✅ 解析成功!共抓到 **{len(posts)}** 篇文章")
+            
+            # 統計總字數
+            total_content_chars = sum(len(p["content"]) for p in posts)
+            total_title_chars = sum(len(p["title"]) for p in posts)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("文章篇數", len(posts))
+            c2.metric("內文總字數", f"{total_content_chars:,}")
+            c3.metric("標題總字數", f"{total_title_chars:,}")
+            
+            st.divider()
+            
+            # ===== 關鍵字輸入 + 搜尋範圍選擇 =====
+            st.subheader("🔎 關鍵字搜尋")
+            col_kw, col_scope = st.columns([3, 1])
+            with col_kw:
+                keyword = st.text_input(
+                    "輸入關鍵字",
+                    placeholder="例如:Friday、Friday+稻草人(AND)、Friday,稻草人(OR)",
+                    key="search_keyword",
+                )
+            with col_scope:
+                search_in = st.radio(
+                    "搜尋範圍",
+                    ["內文", "標題"],
+                    key="search_scope",
+                )
+            search_in_key = "content" if search_in == "內文" else "title"
+            
+            st.caption("💡 語法說明:`+` = AND(都要含)、`,` 或 `|` = OR(任一含)、不分大小寫")
+            
+            if keyword.strip():
+                matched = search_posts(posts, keyword, search_in=search_in_key)
+                
+                # 計算「總篇數」基準 — 標題模式以主討論串為單位
+                if search_in_key == "title":
+                    from collections import OrderedDict
+                    thread_set = OrderedDict()
+                    for p in posts:
+                        key = normalize_thread_title(p["title"])
+                        thread_set[key] = True
+                    total_base = len(thread_set)
+                    base_label = "總討論串數"
+                else:
+                    total_base = len(posts)
+                    base_label = "總篇數"
+                
+                st.divider()
+                st.markdown(f"### 📊 搜尋結果")
+                col_r1, col_r2, col_r3 = st.columns(3)
+                unit = "串" if search_in_key == "title" else "篇"
+                col_r1.metric(f"在「{search_in}」中命中", f"{len(matched)} {unit}")
+                col_r2.metric(base_label, f"{total_base} {unit}")
+                pct = (len(matched) / total_base * 100) if total_base else 0
+                col_r3.metric("命中比例", f"{pct:.1f}%")
+                
+                if search_in_key == "title":
+                    st.caption(f"💡 標題模式:同一主討論串(如「#1 RE: XXX」「#2 RE: XXX」)合併為 1 串計算")
+                else:
+                    st.caption(f"💡 內文模式:主文與每篇推文/回應各算 1 篇")
+                
+                if matched:
+                    label_word = "討論串" if search_in_key == "title" else "文章"
+                    st.subheader(f"📋 命中{label_word}清單({len(matched)} {unit})")
+                    import pandas as pd
+                    rows = []
+                    for i, p in enumerate(matched, 1):
+                        # 擷取命中片段
+                        target = p["snippet_source"]
+                        first_kw = re.split(r'[+,|]', keyword.strip())[0].strip()
+                        idx = target.lower().find(first_kw.lower())
+                        if idx >= 0:
+                            ctx_start = max(0, idx - 20)
+                            ctx_end = min(len(target), idx + len(first_kw) + 40)
+                            snippet = ("..." if ctx_start > 0 else "") + target[ctx_start:ctx_end].replace('\n', ' ') + ("..." if ctx_end < len(target) else "")
+                        else:
+                            snippet = target[:60].replace('\n', ' ') + ("..." if len(target) > 60 else "")
+                        
+                        row = {
+                            "#": i,
+                            "標題": p["title"][:50],
+                            f"{search_in}命中片段": snippet,
+                        }
+                        # 標題模式:多顯示「該串包含幾篇」
+                        if search_in_key == "title" and p.get("thread_size", 1) > 1:
+                            row["該串文章數"] = p["thread_size"]
+                        rows.append(row)
+                    df_results = pd.DataFrame(rows)
+                    st.dataframe(df_results, use_container_width=True, hide_index=True)
+                    
+                    # 可下載 CSV
+                    csv_data = df_results.to_csv(index=False).encode('utf-8-sig')
+                    st.download_button(
+                        "📥 下載命中清單(CSV)",
+                        data=csv_data,
+                        file_name=f"內文指名度_{keyword.replace('+','_').replace(',','_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv",
+                    )
+                else:
+                    st.info("沒有任何文章命中關鍵字")
+            else:
+                st.info("👆 請輸入關鍵字後查詢")
+            
+            # 結束此分支
         
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_name = f"{report_type}_已填_{timestamp}.xlsx"
-        
-        st.download_button(
-            label=f"📥 下載填好的 {report_type}",
-            data=filled_bytes,
-            file_name=out_name,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-            type="primary",
-        )
-        
-        if report_type == "結案表":
-            st.info("💡 **提醒**:\n"
-                    "- 工作表 KPI 的「內文指名度」需要您手動填入\n"
-                    "- 「網友回應分布」第一個區塊(第 4-13 列)未填,因模板註記為「系統抓取後手動處理」")
+        # =============================
+        # 分支:結案表 / 月報表(原本邏輯)
+        # =============================
         else:
-            st.info("💡 **提醒**:\n"
-                    "- 「整體口碑操作議題方向」、「網友正評/負評/複合討論」需要您手動填入\n"
-                    "- 「總覽整理」頁簽不會被修改(保留模板原樣)")
+            # 從內建資料取得對應模板
+            try:
+                template_bytes = get_builtin_template(report_type)
+            except Exception as e:
+                st.error(f"❌ 載入內建模板失敗: {e}")
+                st.stop()
+            
+            with st.spinner("🔍 解析 PDF 並計算數據..."):
+                main_data = extract_main_table(pdf_path)
+                post_types = extract_post_types(pdf_path)
+            
+            if not main_data:
+                st.error("❌ 無法從 PDF 抽取主表資料,請確認上傳的是正確格式的銀河專案 PDF")
+                st.stop()
+            
+            st.success(f"✅ 解析成功!共抓到 **{len(main_data)}** 篇文章資料")
+            
+            # ===== 預覽計算結果 =====
+            st.subheader("👀 預覽計算結果")
+            
+            if report_type == "結案表":
+                result = calculate_all(main_data, post_types)
+                _render_closure_preview(result, main_data, post_types)
+            else:
+                _render_monthly_preview(main_data, post_types)
+            
+            st.divider()
+            
+            # ===== 產生並下載填好的 Excel =====
+            with st.spinner("📝 填入模板..."):
+                try:
+                    if report_type == "月報表":
+                        filled_bytes = fill_monthly_template(BytesIO(template_bytes), main_data, post_types)
+                    else:
+                        filled_bytes = fill_template(BytesIO(template_bytes), result)
+                except Exception as e:
+                    st.error(f"❌ 填入模板失敗: {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
+                    st.stop()
+            
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            out_name = f"{report_type}_已填_{timestamp}.xlsx"
+            
+            st.download_button(
+                label=f"📥 下載填好的 {report_type}",
+                data=filled_bytes,
+                file_name=out_name,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                type="primary",
+            )
+            
+            if report_type == "結案表":
+                st.info("💡 **提醒**:\n"
+                        "- 工作表 KPI 的「內文指名度」需要您手動填入(用第 3 個功能查詢)\n"
+                        "- 「網友回應分布」第一個區塊(第 4-13 列)未填,因模板註記為「系統抓取後手動處理」")
+            else:
+                st.info("💡 **提醒**:\n"
+                        "- 「整體口碑操作議題方向」、「網友正評/負評/複合討論」需要您手動填入\n"
+                        "- 「總覽整理」頁簽不會被修改(保留模板原樣)")
     
     finally:
         # 清理暫存檔
@@ -840,4 +1193,4 @@ if pdf_file:
             os.unlink(pdf_path)
 
 else:
-    st.info("👆 請選擇報表類型,並上傳 PDF 報表後開始")
+    st.info("👆 請選擇功能,並上傳 PDF 報表後開始")
