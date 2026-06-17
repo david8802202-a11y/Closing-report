@@ -472,9 +472,9 @@ def calculate_all(main_data, post_types):
     # ===== 工作表 1:篇數 =====
     # 模板欄位 → PDF 對應名稱
     type_mapping = {
-        "4~5圖+心得文(素人拍+過稿)": ["4~5圖+心得文", "4-5圖+心得文", "4~5圖+分享文", "4-5圖+分享文"],
-        "2~3圖+分享文(素人拍+過稿)": ["2~3圖+分享文", "2~3圖+心得文", "2-3圖+分享文"],
-        "1圖+分享文(素人拍+過稿)": ["1圖+分享文", "1圖+心得文"],
+        "4~5圖+心得文(素人拍+過稿)": ["4-5圖+心得文"], 
+        "2~3圖+分享文(素人拍+過稿)": ["2-3圖+分享文"],
+        "1圖+分享文(素人拍+過稿)": ["1圖+分享文"],
         "分享文": ["分享文"],
         "詳文": ["詳文"],
         "主文": ["主文"],
@@ -486,14 +486,22 @@ def calculate_all(main_data, post_types):
     }
     
     篇數 = {}
-    for template_name, pdf_names in type_mapping.items():
+    for template_name, target_names in type_mapping.items():
         value = 0
-        # 遍歷 PDF 抓到的所有類型
         for k, v in post_types.items():
+            # 把 PDF 抓到的名稱正規化（統一去空白、變連字號）
             norm_k = normalize(k)
-            # 改用 startswith：只要 PDF 上的字眼「開頭」符合我們設定的關鍵字，就累加篇數
-            if any(norm_k.startswith(normalize(pdf_name)) for pdf_name in pdf_names):
-                value += v
+            # 關鍵步驟：把半形括號 '(' 和全形括號 '（' 後面的字全切掉
+            # 這樣 "4~5圖+心得文(素人拍+不過稿)" 就會乾淨地變成 "4-5圖+心得文"
+            base_k = norm_k.split('(')[0].split('（')[0]
+            
+            for target in target_names:
+                norm_target = normalize(target)
+                base_target = norm_target.split('(')[0].split('（')[0]
+                
+                # 只有基礎字串「完全相等」時才加總，徹底杜絕抓錯或重複計算！
+                if base_k == base_target:
+                    value += v
         篇數[template_name] = value
     result["篇數"] = 篇數
     
