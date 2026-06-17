@@ -676,8 +676,65 @@ def fill_template(template_path, calc_result):
     }
     for name, cell in 上方小表映射.items():
         ws1[cell] = calc_result["篇數"].get(name, 0)
-    # 第 5 列「總計」= 橫列加總
-    ws1["C5"] = "=SUM(C4:L4)"
+    # 第 5 列「總計」= 直接寫入計算後的數值
+    上方小表總計 = sum(calc_result["篇數"].get(name, 0) for name in 上方小表映射.keys())
+    
+    # 處理合併儲存格 + 刪 0 欄:
+    # 策略:取消合併 → 把整列(C-L)的格式全變成跟 C5 一樣的灰底 → 刪除 0 欄 → 重新合併
+    # 這樣即使 openpyxl 在 merge 後不能改 D-L 樣式,因為刪除前就先套了灰底,
+    # 而 delete_cols 會把剩下的儲存格往前移,樣式跟著移
+    
+    # (1) 找出合併範圍 + 保存 C5 樣式 + 解除合併
+    上方小表_merged = None
+    保留_C5樣式 = None
+    for rng in list(ws1.merged_cells.ranges):
+        if rng.min_row == 5 and rng.max_row == 5 and rng.min_col == 3:
+            上方小表_merged = (rng.min_col, rng.max_col)
+            c5_cell = ws1.cell(row=5, column=3)
+            from copy import copy
+            保留_C5樣式 = {
+                "fill": copy(c5_cell.fill),
+                "font": copy(c5_cell.font),
+                "border": copy(c5_cell.border),
+            }
+            ws1.unmerge_cells(str(rng))
+            break
+    
+    # (2) 解除合併後立即把整個原合併範圍(C5:L5)的填色都設成灰底 + 粗體
+    # 這樣後續刪欄時,剩下的儲存格還是灰底
+    if 上方小表_merged and 保留_C5樣式:
+        for col in range(上方小表_merged[0], 上方小表_merged[1] + 1):
+            cell = ws1.cell(row=5, column=col)
+            cell.fill = 保留_C5樣式["fill"]
+            cell.font = 保留_C5樣式["font"]
+            cell.border = 保留_C5樣式["border"]
+    
+    # (3) 從右到左刪除「篇數=0」的欄
+    刪除欄數 = 0
+    for col_idx in range(12, 2, -1):  # 從 L (12) 到 C (3) 反向
+        篇數值 = ws1.cell(row=4, column=col_idx).value
+        if 篇數值 == 0:
+            ws1.delete_cols(col_idx)
+            刪除欄數 += 1
+    
+    # (4) 重新合併剩下的範圍 + 寫入總計值
+    if 上方小表_merged is not None and 刪除欄數 < (上方小表_merged[1] - 上方小表_merged[0] + 1):
+        新最右欄 = 上方小表_merged[1] - 刪除欄數
+        if 新最右欄 > 上方小表_merged[0]:
+            from openpyxl.utils import get_column_letter
+            from openpyxl.styles import Alignment
+            
+            合併範圍 = f"{get_column_letter(上方小表_merged[0])}5:{get_column_letter(新最右欄)}5"
+            ws1.merge_cells(合併範圍)
+            # 左上角寫入值 + 設置中對齊
+            總計儲存格 = ws1.cell(row=5, column=上方小表_merged[0])
+            總計儲存格.value = 上方小表總計
+            總計儲存格.alignment = Alignment(horizontal="center", vertical="center")
+        else:
+            cell = ws1.cell(row=5, column=上方小表_merged[0])
+            cell.value = 上方小表總計
+            from openpyxl.styles import Alignment
+            cell.alignment = Alignment(horizontal="center", vertical="center")
     
     # 區塊 B (直式清單) - 第 14~24 列
     區塊B映射 = {
@@ -694,8 +751,17 @@ def fill_template(template_path, calc_result):
     }
     for name, cell in 區塊B映射.items():
         ws1[cell] = calc_result["篇數"].get(name, 0)
-    # C25 是合計,用公式
-    ws1["C25"] = "=SUM(C15:C24)"
+    # C25 合計 = 直接寫入計算後的數值
+    區塊B總計 = sum(calc_result["篇數"].get(name, 0) for name in 區塊B映射.keys())
+    ws1["C25"] = 區塊B總計
+    
+    # 刪除「篇數=0」的列(從下到上,避免列號錯位)
+    # 區塊 B 列 15-24,從 24 開始反向
+    區塊B_列範圍 = list(區塊B映射.items())
+    for name, cell in reversed(區塊B_列範圍):
+        row_num = int(cell[1:])  # 從 "C15" 取出 15
+        if calc_result["篇數"].get(name, 0) == 0:
+            ws1.delete_rows(row_num)
     
     # ----- 工作表 2:KPI -----
     ws2 = wb["KPI"]
@@ -715,8 +781,26 @@ def fill_template(template_path, calc_result):
         ("其他版面", 8),
         ("FB社團", 9),
     ]
-    # 先填值
-    for cat, row_num in 版面列對應:
+    
+    # 先判斷哪些版面要刪除(整列全為 0)
+    要刪除的版面 = set()
+    for cat, _ in 版面列對應:
+        d = calc_result["分布"][cat]
+        if (d["實際溝通"] == 0 and d["正面討論"] == 0 and d["負面討論"] == 0
+                and d["議題討論"] == 0 and d["產品討論"] == 0 and d["複合討論"] == 0):
+            要刪除的版面.add(cat)
+    
+    # 從底部往上刪除(避免列號錯位)
+    for cat, row_num in reversed(版面列對應):
+        if cat in 要刪除的版面:
+            ws3.delete_rows(row_num)
+    
+    # 刪除後重新計算保留版面的新列號(按原順序)
+    保留版面 = [(cat, orig_row) for cat, orig_row in 版面列對應 if cat not in 要刪除的版面]
+    
+    # 重新填值到新位置:從列 5 開始連續排列
+    for new_idx, (cat, _) in enumerate(保留版面):
+        row_num = 5 + new_idx
         d = calc_result["分布"][cat]
         ws3.cell(row=row_num, column=3).value = d["實際溝通"]   # C
         ws3.cell(row=row_num, column=4).value = d["正面討論"]   # D
@@ -724,23 +808,41 @@ def fill_template(template_path, calc_result):
         ws3.cell(row=row_num, column=6).value = d["議題討論"]   # F
         ws3.cell(row=row_num, column=7).value = d["產品討論"]   # G
         ws3.cell(row=row_num, column=8).value = d["複合討論"]   # H
-        # I 欄(回應小計)用公式
-        ws3.cell(row=row_num, column=9).value = f"=SUM(D{row_num}:H{row_num})"
+        # I 欄(回應小計)— 直接寫入計算好的數值,不用公式
+        回應小計 = d["正面討論"] + d["負面討論"] + d["議題討論"] + d["產品討論"] + d["複合討論"]
+        ws3.cell(row=row_num, column=9).value = 回應小計
     
-    # 從底部往上刪「整列全為 0」的版面(避免列號錯位)
-    for cat, row_num in reversed(版面列對應):
+    # 修正底部「發文篇數總計」列的公式範圍
+    # 原模板總計在第 14 列(列 5-9 是版面、10-13 是空白、14 是總計)
+    # 1. 先刪除空白列 10-13(模板殘留的舊公式列)
+    # 2. 刪了 N 列(空版面)+ 4 列空白 後總計列變成 14-刪除版面數-4
+    刪除數 = len(要刪除的版面)
+    
+    # 刪除模板殘留的「空白計算列」10、11、12、13
+    新總計列原始 = 14 - 刪除數
+    for offset in range(1, 5):
+        ws3.delete_rows(新總計列原始 - offset)
+    
+    # 計算總計列的位置 + 直接寫入數值(不用公式,避免 Excel 不自動算)
+    總計列 = 14 - 刪除數 - 4
+    # 直接算出總和填入
+    分布總和 = {"實際溝通": 0, "正面討論": 0, "負面討論": 0, "議題討論": 0, "產品討論": 0, "複合討論": 0}
+    for cat, _ in 保留版面:
         d = calc_result["分布"][cat]
-        all_zero = (
-            d["實際溝通"] == 0
-            and d["正面討論"] == 0
-            and d["負面討論"] == 0
-            and d["議題討論"] == 0
-            and d["產品討論"] == 0
-            and d["複合討論"] == 0
-        )
-        if all_zero:
-            ws3.delete_rows(row_num)
-    # 第 14 列「發文篇數總計」模板已內建公式,刪除上面的列後 Excel 會自動調整公式參照
+        for k in 分布總和:
+            分布總和[k] += d[k]
+    
+    ws3.cell(row=總計列, column=3).value = 分布總和["實際溝通"]   # C
+    ws3.cell(row=總計列, column=4).value = 分布總和["正面討論"]   # D
+    ws3.cell(row=總計列, column=5).value = 分布總和["負面討論"]   # E
+    ws3.cell(row=總計列, column=6).value = 分布總和["議題討論"]   # F
+    ws3.cell(row=總計列, column=7).value = 分布總和["產品討論"]   # G
+    ws3.cell(row=總計列, column=8).value = 分布總和["複合討論"]   # H
+    # I 欄回應小計
+    ws3.cell(row=總計列, column=9).value = (
+        分布總和["正面討論"] + 分布總和["負面討論"] + 分布總和["議題討論"]
+        + 分布總和["產品討論"] + 分布總和["複合討論"]
+    )
     
     # 輸出到 bytes
     output = BytesIO()
