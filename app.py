@@ -274,7 +274,8 @@ def normalize_thread_title(title):
     例:
     - "[閒聊] 稻草人 不負責任兇手亂猜"        → "[閒聊] 稻草人 不負責任兇手亂猜"
     - "#1 RE: [閒聊] 稻草人 不負責任兇手亂猜"  → "[閒聊] 稻草人 不負責任兇手亂猜"
-    - "#3 RE: 心目中的反派演員第一名?"        → "心目中的反派演員第一名?"
+    - "#? RE: 心目中的反派演員第一名?"        → "心目中的反派演員第一名?"
+    - "RE: 心目中的反派演員第一名?"           → "心目中的反派演員第一名?"
     """
     if not title:
         return ""
@@ -282,8 +283,9 @@ def normalize_thread_title(title):
     # 移除 PDF 私用區字符(常是字體圖示,如類型標記、編輯按鈕等)
     cleaned = ''.join(ch for ch in cleaned if not (0xE000 <= ord(ch) <= 0xF8FF))
     cleaned = cleaned.strip()
-    # 去除「#數字 RE: 」或「RE: 」開頭
-    cleaned = re.sub(r'^#\d+\s*RE:\s*', '', cleaned)
+    # 去除「#XXX RE: 」開頭(XXX 可以是任何非空白字符,例如數字、問號、字母)
+    cleaned = re.sub(r'^#\S*\s*RE:\s*', '', cleaned)
+    # 去除單純的「RE: 」開頭
     cleaned = re.sub(r'^RE:\s*', '', cleaned)
     # 將內部多重空白統一為單一空白
     cleaned = re.sub(r'\s+', ' ', cleaned)
