@@ -653,15 +653,43 @@ def fill_monthly_template(template_path, main_data, post_types):
     ws2 = wb["版面佔比"]
     # 模板已有的:B10 PTT / B11 DCARD / B12 THREAD / B13 其他版面
     # 「網友回應數」欄位 = PDF 各站版的「網友回應量」加總
+    版面列對應 = [
+        ("PTT", 10),
+        ("DCARD", 11),
+        ("THREAD", 12),
+        ("其他版面", 13),
+    ]
     cat_reply_sum = {"PTT": 0, "DCARD": 0, "THREAD": 0, "其他版面": 0}
     for r in main_data:
         cat = categorize_station_monthly(r["站版"])
         cat_reply_sum[cat] += r["網友回應量"]
     
-    ws2["C10"] = cat_reply_sum["PTT"]
-    ws2["C11"] = cat_reply_sum["DCARD"]
-    ws2["C12"] = cat_reply_sum["THREAD"]
-    ws2["C13"] = cat_reply_sum["其他版面"]
+    # 先填值
+    for cat, row in 版面列對應:
+        ws2.cell(row=row, column=3).value = cat_reply_sum[cat]
+    
+    # 找出要刪的列(網友回應量=0 的版面)
+    要刪除列號 = [row for cat, row in 版面列對應 if cat_reply_sum[cat] == 0]
+    
+    # 從底部往上刪(避免列號錯位)
+    for row_num in reversed(要刪除列號):
+        ws2.delete_rows(row_num)
+    
+    # 重新計算剩下的資料範圍(用來更新圓餅圖)
+    保留版面數 = 4 - len(要刪除列號)
+    if 保留版面數 > 0:
+        新資料結束列 = 10 + 保留版面數 - 1  # 例如保留 3 個版面 → 列 10-12
+        
+        # 更新圓餅圖的資料範圍
+        from openpyxl.chart.reference import Reference
+        for chart in ws2._charts:
+            # 用新的 Reference 重建類別軸與數值
+            cat_ref = Reference(ws2, min_col=2, min_row=10, max_col=2, max_row=新資料結束列)
+            val_ref = Reference(ws2, min_col=3, min_row=10, max_col=3, max_row=新資料結束列)
+            # 清空舊 series,加新的
+            chart.series = []
+            chart.add_data(val_ref, titles_from_data=False)
+            chart.set_categories(cat_ref)
     
     # ----- 頁簽 3「總覽整理」:不處理 -----
     
