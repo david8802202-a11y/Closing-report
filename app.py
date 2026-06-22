@@ -228,27 +228,38 @@ def extract_posts_with_content(pdf_path):
     """從「專案發文總覽 PDF」抽出每篇文章的 title.標題 + cnt.內文
     
     結構特徵:
-    - 每篇文章都有 「title.標題 {標題}\ncnt.內文 {內文} ... Time.發文時間/截圖」
-    - 內文可能跨多頁
+    - 每篇文章都有「目標站版」「網址紀錄」「cnt.內文」這 3 個必有欄位
+    - 「title.標題」可能在「主文」會出現,但「推文」有時會省略
+    
+    因此用「目標站版」當分割錨點(每篇必有),確保抓到所有文章。
     """
     with pdfplumber.open(pdf_path) as pdf:
         full_text = ""
         for p in pdf.pages:
             full_text += unicodedata.normalize('NFKC', p.extract_text() or '') + "\n"
     
-    # 用 title.標題 當錨點切分每篇
-    title_matches = list(re.finditer(r'title\.標題\s+(.+?)(?=\ncnt\.內文)', full_text, re.DOTALL))
+    # 用「目標站版」當錨點(每篇文章必有)
+    station_matches = list(re.finditer(r'目標站版\s+(.+?)(?=\n)', full_text))
     
     posts = []
-    for i, m in enumerate(title_matches):
-        title = m.group(1).strip().replace('\n', ' ')
-        
-        # 該篇從 cnt.內文 開始,到下一個 title.標題 結束
-        start = m.end()
-        next_start = title_matches[i + 1].start() if i + 1 < len(title_matches) else len(full_text)
+    最近的標題 = ""  # 同一討論串若無 title.標題 就繼承上一篇的標題(用於分組)
+    
+    for i, m in enumerate(station_matches):
+        # 該篇的範圍:從這個「目標站版」到下一個「目標站版」(或文件結尾)
+        start = m.start()
+        next_start = station_matches[i + 1].start() if i + 1 < len(station_matches) else len(full_text)
         block = full_text[start:next_start]
         
-        # 內文:cnt.內文 後面 → 直到 Time.發文時間 / 截圖 / 下一篇
+        # 抓「title.標題」(可能沒有)
+        title_match = re.search(r'title\.標題\s+(.+?)(?=\n)', block)
+        if title_match:
+            title = title_match.group(1).strip().replace('\n', ' ')
+            最近的標題 = title  # 更新「最近見過的標題」供後續無標題的篇繼承
+        else:
+            # 沒有 title.標題 — 用最近見過的標題,加上「#? RE:」前綴標記為衍生回應
+            title = f"#? RE: {最近的標題}" if 最近的標題 else "(無標題)"
+        
+        # 抓「cnt.內文」內容 — 從 cnt.內文 之後直到 Time.發文時間 / 截圖 / 區段結束
         content_match = re.search(r'cnt\.內文(.*?)(?:\n\s*Time\.發文時間|\n\s*截圖|\Z)', block, re.DOTALL)
         content = content_match.group(1).strip() if content_match else ""
         
