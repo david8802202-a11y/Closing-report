@@ -472,9 +472,11 @@ def calculate_all(main_data, post_types):
     # ===== 工作表 1:篇數 =====
     # 模板欄位 → PDF 對應名稱
     type_mapping = {
-        "4~5圖+心得文(素人拍+過稿)": ["4~5圖+心得文"], 
-        "2~3圖+分享文(素人拍+過稿)": ["2~3圖+分享文"],
-        "1圖+分享文(素人拍+過稿)": ["1圖+分享文"],
+        "4~5圖+心得文(素人拍+不過稿)": ["4~5圖+心得文(素人拍+不過稿)", "4~5圖+心得文(提供照片+不過稿)",
+                                  "4~5圖+心得文(素人拍+過稿)", "4~5圖+心得文(提供照片+過稿)",
+                                  "4~5圖+心得文"],
+        "2~3圖+分享文(素人拍+過稿)": ["2~3圖+分享文(提供照片+過稿)", "2~3圖+分享文(素人拍+過稿)", "2~3圖+分享文"],
+        "1圖+分享文(素人拍+過稿)": ["1圖+分享文(提供照片+過稿)", "1圖+分享文(素人拍+過稿)", "1圖+分享文"],
         "分享文": ["分享文"],
         "詳文": ["詳文"],
         "主文": ["主文"],
@@ -486,22 +488,15 @@ def calculate_all(main_data, post_types):
     }
     
     篇數 = {}
-    for template_name, target_names in type_mapping.items():
+    for template_name, pdf_names in type_mapping.items():
         value = 0
-        for k, v in post_types.items():
-            # 把 PDF 抓到的名稱正規化（統一去空白、變連字號）
-            norm_k = normalize(k)
-            # 關鍵步驟：把半形括號 '(' 和全形括號 '（' 後面的字全切掉
-            # 這樣 "4~5圖+心得文(素人拍+不過稿)" 就會乾淨地變成 "4-5圖+心得文"
-            base_k = norm_k.split('(')[0].split('（')[0]
-            
-            for target in target_names:
-                norm_target = normalize(target)
-                base_target = norm_target.split('(')[0].split('（')[0]
-                
-                # 只有基礎字串「完全相等」時才加總，徹底杜絕抓錯或重複計算！
-                if base_k == base_target:
-                    value += v
+        for pdf_name in pdf_names:
+            for k, v in post_types.items():
+                if normalize(pdf_name) == normalize(k):
+                    value = v
+                    break
+            if value > 0:
+                break
         篇數[template_name] = value
     result["篇數"] = 篇數
     
@@ -652,48 +647,174 @@ def fill_template(template_path, calc_result):
     
     # ----- 工作表 1:篇數 -----
     ws1 = wb["篇數"]
-    篇數欄位映射 = {
-        "4~5圖+心得文(素人拍+過稿)": "C8",
-        "2~3圖+分享文(素人拍+過稿)": "D8",
-        "1圖+分享文(素人拍+過稿)": "E8",
-        "分享文": "F8",
-        "詳文": "G8",
-        "主文": "H8",
-        "推文": "I8",
-        "FB-主文": "J8",
-        "FB-推文": "K8",
-        "置入主文": "L8",
-        "置入推文": "M8",
-    }
+    from copy import copy
+    
+    篇數資料 = calc_result["篇數"]
+    
+    # === 檢查 PDF 是否含「4~5圖+心得文」變體(且實際篇數 > 0)===
+    四五圖類型 = [k for k in 篇數資料.keys() if "4~5圖" in k and 篇數資料.get(k, 0) > 0]
+    要插入4_5圖 = len(四五圖類型) > 0
+    四五圖總篇數 = sum(篇數資料.get(k, 0) for k in 四五圖類型) if 要插入4_5圖 else 0
+    四五圖代表名 = 四五圖類型[0] if 要插入4_5圖 else None
+    
+    # 文案類型欄位順序(從左到右)
+    # 沒有 4~5圖時:2~3圖、1圖、分享文、詳文、主文、推文、FB-主文、FB-推文、置入主文、置入推文(10 欄)
+    # 有 4~5圖時 :4~5圖、2~3圖、1圖、分享文、詳文、主文、推文、FB-主文、FB-推文、置入主文、置入推文(11 欄)
+    
+    if 要插入4_5圖:
+        # === 動態插入 4~5圖 欄/列 ===
+        # 1. 上方小表 A 的合併儲存格(C5:L5)會被 insert_cols 影響,先解除再重建
+        舊合併 = None
+        for rng in list(ws1.merged_cells.ranges):
+            if rng.min_row == 5 and rng.max_row == 5 and rng.min_col == 3:
+                舊合併 = (rng.min_col, rng.max_col)
+                ws1.unmerge_cells(str(rng))
+                break
+        
+        # 2. 在 C 欄之前插入新欄(會影響到上方小表 A 跟 B,因為它們都用 C-L 欄)
+        ws1.insert_cols(3)
+        # 此時:
+        #   原 C(2~3圖)→ 變成 D
+        #   原 L(置入推文)→ 變成 M
+        #   新 C 是空白欄
+        
+        # 3. 在 C 欄寫入 4~5圖 的內容
+        # 上方小表 A:列 3 表頭、列 4 篇數
+        ws1["C3"] = "4~5圖\n心得文"
+        ws1["C4"] = 四五圖總篇數
+        # 上方小表 B:列 7 完整名稱、列 8 篇數
+        ws1["C7"] = 四五圖代表名
+        ws1["C8"] = 四五圖總篇數
+        # 套用樣式(複製 D 欄相對應位置的格式)
+        for src_row in [3, 4, 7, 8]:
+            src_cell = ws1.cell(row=src_row, column=4)  # D 欄
+            new_cell = ws1.cell(row=src_row, column=3)  # 新 C 欄
+            new_cell.fill = copy(src_cell.fill)
+            new_cell.font = copy(src_cell.font)
+            new_cell.alignment = copy(src_cell.alignment)
+            new_cell.border = copy(src_cell.border)
+        # 列 5 (總計列)也要套樣式 — 從 D5(原 C5,有灰底)複製
+        d5 = ws1.cell(row=5, column=4)
+        c5 = ws1.cell(row=5, column=3)
+        c5.fill = copy(d5.fill)
+        c5.font = copy(d5.font)
+        c5.border = copy(d5.border)
+        
+        # 4. 重新合併總計列(範圍從 C5:L5 → C5:M5)
+        if 舊合併:
+            from openpyxl.utils import get_column_letter
+            ws1.merge_cells(f"C5:{get_column_letter(舊合併[1] + 1)}5")
+        
+        # 5. 下方清單 C:在列 15 之前插入新列
+        ws1.insert_rows(15)
+        ws1["B15"] = 四五圖代表名
+        ws1["C15"] = 四五圖總篇數
+        # 套用 B16/C16 的樣式
+        for col_letter in ["B", "C"]:
+            src = ws1[f"{col_letter}16"]
+            dst = ws1[f"{col_letter}15"]
+            dst.fill = copy(src.fill)
+            dst.font = copy(src.font)
+            dst.alignment = copy(src.alignment)
+            dst.border = copy(src.border)
+        
+        # 6. 調整映射表(因插入了 1 欄 + 1 列)
+        # 上方小表 B 是列 7-8(欄向後位移 1)
+        篇數欄位映射 = {
+            "2~3圖+分享文(素人拍+過稿)": "D8",
+            "1圖+分享文(素人拍+過稿)": "E8",
+            "分享文": "F8",
+            "詳文": "G8",
+            "主文": "H8",
+            "推文": "I8",
+            "FB-主文": "J8",
+            "FB-推文": "K8",
+            "置入主文": "L8",
+            "置入推文": "M8",
+        }
+        # 上方小表 A 列 4 篇數(欄向後位移 1)
+        上方小表映射 = {
+            "2~3圖+分享文(素人拍+過稿)": "D4",
+            "1圖+分享文(素人拍+過稿)": "E4",
+            "分享文": "F4",
+            "詳文": "G4",
+            "主文": "H4",
+            "推文": "I4",
+            "FB-主文": "J4",
+            "FB-推文": "K4",
+            "置入主文": "L4",
+            "置入推文": "M4",
+        }
+        # 下方清單 C(列向後位移 1,因為插入了列 15)
+        區塊B映射 = {
+            "2~3圖+分享文(素人拍+過稿)": "C16",
+            "1圖+分享文(素人拍+過稿)": "C17",
+            "分享文": "C18",
+            "詳文": "C19",
+            "主文": "C20",
+            "推文": "C21",
+            "FB-主文": "C22",
+            "FB-推文": "C23",
+            "置入主文": "C24",
+            "置入推文": "C25",
+        }
+        合計列號 = 26  # 原本 25 + 1
+        上方小表最大欄 = 13  # M(原本 L=12 + 1)
+    else:
+        # === 原本邏輯:沒有 4~5圖 時 ===
+        篇數欄位映射 = {
+            "2~3圖+分享文(素人拍+過稿)": "C8",
+            "1圖+分享文(素人拍+過稿)": "D8",
+            "分享文": "E8",
+            "詳文": "F8",
+            "主文": "G8",
+            "推文": "H8",
+            "FB-主文": "I8",
+            "FB-推文": "J8",
+            "置入主文": "K8",
+            "置入推文": "L8",
+        }
+        上方小表映射 = {
+            "2~3圖+分享文(素人拍+過稿)": "C4",
+            "1圖+分享文(素人拍+過稿)": "D4",
+            "分享文": "E4",
+            "詳文": "F4",
+            "主文": "G4",
+            "推文": "H4",
+            "FB-主文": "I4",
+            "FB-推文": "J4",
+            "置入主文": "K4",
+            "置入推文": "L4",
+        }
+        區塊B映射 = {
+            "2~3圖+分享文(素人拍+過稿)": "C15",
+            "1圖+分享文(素人拍+過稿)": "C16",
+            "分享文": "C17",
+            "詳文": "C18",
+            "主文": "C19",
+            "推文": "C20",
+            "FB-主文": "C21",
+            "FB-推文": "C22",
+            "置入主文": "C23",
+            "置入推文": "C24",
+        }
+        合計列號 = 25
+        上方小表最大欄 = 12  # L
+    
+    # === 填值到上方小表 B(列 7-8)===
     for name, cell in 篇數欄位映射.items():
-        ws1[cell] = calc_result["篇數"].get(name, 0)
+        ws1[cell] = 篇數資料.get(name, 0)
     
-    # 區塊 A 上方小表(第 3-5 列):欄位順序跟第 7-8 列相同
-    # 第 4 列「篇數」= 與第 8 列同樣的數字
-    # 第 5 列「總計」= 橫列加總
-    上方小表映射 = {
-        "4~5圖+心得文(素人拍+過稿)": "C4",
-        "2~3圖+分享文(素人拍+過稿)": "D4",  # 對應 C3「2~3圖分享文」
-        "1圖+分享文(素人拍+過稿)": "E4",   # 對應 D3「1圖分享文」
-        "分享文": "F4",
-        "詳文": "G4",
-        "主文": "H4",
-        "推文": "I4",
-        "FB-主文": "J4",
-        "FB-推文": "K4",
-        "置入主文": "L4",
-        "置入推文": "M4",
-    }
+    # === 填值到上方小表 A 第 4 列「篇數」+ 區塊 B 下方清單 + 第 5 列「總計」===
     for name, cell in 上方小表映射.items():
-        ws1[cell] = calc_result["篇數"].get(name, 0)
-    # 第 5 列「總計」= 直接寫入計算後的數值
-    上方小表總計 = sum(calc_result["篇數"].get(name, 0) for name in 上方小表映射.keys())
+        ws1[cell] = 篇數資料.get(name, 0)
     
-    # 處理合併儲存格 + 刪 0 欄:
-    # 策略:取消合併 → 把整列(C-L)的格式全變成跟 C5 一樣的灰底 → 刪除 0 欄 → 重新合併
-    # 這樣即使 openpyxl 在 merge 後不能改 D-L 樣式,因為刪除前就先套了灰底,
-    # 而 delete_cols 會把剩下的儲存格往前移,樣式跟著移
+    # 上方小表 A 第 5 列「總計」
+    上方小表總計 = sum(篇數資料.get(name, 0) for name in 上方小表映射.keys())
+    if 要插入4_5圖:
+        上方小表總計 += 四五圖總篇數
     
+    # === 處理上方小表 A 第 5 列(合併儲存格)+ 刪除 0 欄 ===
     # (1) 找出合併範圍 + 保存 C5 樣式 + 解除合併
     上方小表_merged = None
     保留_C5樣式 = None
@@ -701,7 +822,6 @@ def fill_template(template_path, calc_result):
         if rng.min_row == 5 and rng.max_row == 5 and rng.min_col == 3:
             上方小表_merged = (rng.min_col, rng.max_col)
             c5_cell = ws1.cell(row=5, column=3)
-            from copy import copy
             保留_C5樣式 = {
                 "fill": copy(c5_cell.fill),
                 "font": copy(c5_cell.font),
@@ -710,8 +830,7 @@ def fill_template(template_path, calc_result):
             ws1.unmerge_cells(str(rng))
             break
     
-    # (2) 解除合併後立即把整個原合併範圍(C5:L5)的填色都設成灰底 + 粗體
-    # 這樣後續刪欄時,剩下的儲存格還是灰底
+    # (2) 把整個原合併範圍的填色設成 C5 樣式(灰底),確保刪欄後仍是灰底
     if 上方小表_merged and 保留_C5樣式:
         for col in range(上方小表_merged[0], 上方小表_merged[1] + 1):
             cell = ws1.cell(row=5, column=col)
@@ -719,9 +838,9 @@ def fill_template(template_path, calc_result):
             cell.font = 保留_C5樣式["font"]
             cell.border = 保留_C5樣式["border"]
     
-    # (3) 從右到左刪除「篇數=0」的欄
+    # (3) 從右到左刪除「篇數=0」的欄(範圍是 C-最大欄)
     刪除欄數 = 0
-    for col_idx in range(12, 2, -1):  # 從 L (12) 到 C (3) 反向
+    for col_idx in range(上方小表最大欄, 2, -1):
         篇數值 = ws1.cell(row=4, column=col_idx).value
         if 篇數值 == 0:
             ws1.delete_cols(col_idx)
@@ -730,48 +849,30 @@ def fill_template(template_path, calc_result):
     # (4) 重新合併剩下的範圍 + 寫入總計值
     if 上方小表_merged is not None and 刪除欄數 < (上方小表_merged[1] - 上方小表_merged[0] + 1):
         新最右欄 = 上方小表_merged[1] - 刪除欄數
+        from openpyxl.utils import get_column_letter
+        from openpyxl.styles import Alignment
         if 新最右欄 > 上方小表_merged[0]:
-            from openpyxl.utils import get_column_letter
-            from openpyxl.styles import Alignment
-            
             合併範圍 = f"{get_column_letter(上方小表_merged[0])}5:{get_column_letter(新最右欄)}5"
             ws1.merge_cells(合併範圍)
-            # 左上角寫入值 + 設置中對齊
-            總計儲存格 = ws1.cell(row=5, column=上方小表_merged[0])
-            總計儲存格.value = 上方小表總計
-            總計儲存格.alignment = Alignment(horizontal="center", vertical="center")
-        else:
-            cell = ws1.cell(row=5, column=上方小表_merged[0])
-            cell.value = 上方小表總計
-            from openpyxl.styles import Alignment
-            cell.alignment = Alignment(horizontal="center", vertical="center")
+        總計儲存格 = ws1.cell(row=5, column=上方小表_merged[0])
+        總計儲存格.value = 上方小表總計
+        總計儲存格.alignment = Alignment(horizontal="center", vertical="center")
     
-    # 區塊 B (直式清單) - 第 14~24 列
-    區塊B映射 = {
-        "4~5圖+心得文(素人拍+過稿)": "C15",
-        "2~3圖+分享文(素人拍+過稿)": "C16",
-        "1圖+分享文(素人拍+過稿)": "C17",
-        "分享文": "C18",
-        "詳文": "C19",
-        "主文": "C20",
-        "推文": "C21",
-        "FB-主文": "C22",
-        "FB-推文": "C23",
-        "置入主文": "C24",
-        "置入推文": "C25",
-    }
+    # === 區塊 B (下方清單) 填值 + 合計 + 刪 0 列 ===
     for name, cell in 區塊B映射.items():
-        ws1[cell] = calc_result["篇數"].get(name, 0)
-    # C25 合計 = 直接寫入計算後的數值
-    區塊B總計 = sum(calc_result["篇數"].get(name, 0) for name in 區塊B映射.keys())
-    ws1["C25"] = 區塊B總計
+        ws1[cell] = 篇數資料.get(name, 0)
+    
+    # 合計列(隨 4~5圖 插入而動,在 合計列號)
+    區塊B總計 = sum(篇數資料.get(name, 0) for name in 區塊B映射.keys())
+    if 要插入4_5圖:
+        區塊B總計 += 四五圖總篇數
+    ws1.cell(row=合計列號, column=3).value = 區塊B總計
     
     # 刪除「篇數=0」的列(從下到上,避免列號錯位)
-    # 區塊 B 列 15-24,從 24 開始反向
     區塊B_列範圍 = list(區塊B映射.items())
     for name, cell in reversed(區塊B_列範圍):
-        row_num = int(cell[1:])  # 從 "C15" 取出 15
-        if calc_result["篇數"].get(name, 0) == 0:
+        row_num = int(cell[1:])
+        if 篇數資料.get(name, 0) == 0:
             ws1.delete_rows(row_num)
     
     # ----- 工作表 2:KPI -----
