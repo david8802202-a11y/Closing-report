@@ -435,27 +435,34 @@ def extract_post_types(pdf_path):
     
     section = full_text[start_idx:end_idx]
     
-    # 匹配「文案類型名 + 空白 + 純數字」格式的每一行
+    # 匹配「文案類型名 + 空白 + 第一個數字」
+    # 新版 PDF 可能有額外欄位:「文案類型 累計 預計完成 完成率」
+    # 例如:「分享文 9 9 100.00%」— 只需抓第一個數字 9
     for line in section.split('\n'):
         line = line.strip()
         if not line:
             continue
-        # 排除標題列
-        if line in ("文案類型 累計", "文案類型", "累計"):
+        # 排除標題列(各種變體)
+        if line in ("文案類型 累計", "文案類型", "累計",
+                    "文案類型 累計 預計完成 完成率",
+                    "文案類型 累計 預計 完成率"):
             continue
-        # 匹配 "<類型名> <數字>" 結構
-        m = re.match(r'^(.+?)\s+(\d+)\s*$', line)
+        # 排除百分比結尾的標題類字串(避免誤抓「文案類型 累計 預計完成 完成率」的位置)
+        if line.startswith("文案類型 "):
+            continue
+        # 匹配「<類型名> <第一個數字> [後面可能還有其他欄位]」
+        m = re.match(r'^(.+?)\s+(\d+)(?:\s+.*)?$', line)
         if m:
             name = m.group(1).strip()
             count = int(m.group(2))
             # 排除「合計」
             if name == "合計":
                 continue
-            # 排除站版分布或含特殊符號的列
-            if ":" in name or "%" in name:
+            # 排除站版分布的列(含「:」表示是站版名稱,不是文案類型)
+            if ":" in name:
                 continue
-            # 排除含小數點百分比的行
-            if re.search(r'\d+\.\d+', line):
+            # 排除類型名本身就含百分比的(不太可能,但保險)
+            if "%" in name:
                 continue
             types[name] = count
     
