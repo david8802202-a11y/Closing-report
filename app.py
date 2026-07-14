@@ -485,8 +485,15 @@ def categorize_station(stb):
     return "其他版面"
 
 
-def calculate_all(main_data, post_types):
-    """計算所有要填入模板的數字"""
+def calculate_all(main_data, post_types, active_axes=None):
+    """計算所有要填入模板的數字
+    
+    Args:
+        main_data: 主表資料
+        post_types: 文案類型
+        active_axes: 若提供,則「議題曝光數」= 主軸在此清單內的列數(串數)。
+                     若 None,回傳所有可能的主軸清單,不強制篩選(用預設邏輯:非「置入」)。
+    """
     result = {}
     
     # ===== 工作表 1:篇數 =====
@@ -540,8 +547,14 @@ def calculate_all(main_data, post_types):
     kpi = {}
     # 網友回應數 = 網友回應量整列加總
     kpi["網友回應數"] = sum(r["網友回應量"] for r in main_data)
-    # 議題曝光數 = 主軸不含「置入」的列數
-    kpi["議題曝光數"] = sum(1 for r in main_data if "置入" not in r["主軸"])
+    # 議題曝光數:
+    # - 若使用者有指定「主動主軸清單」,則計算「主軸在該清單內」的列數
+    # - 否則沿用預設邏輯:主軸不含「置入」的列數
+    if active_axes is not None:
+        active_set = set(active_axes)
+        kpi["議題曝光數"] = sum(1 for r in main_data if r["主軸"] in active_set)
+    else:
+        kpi["議題曝光數"] = sum(1 for r in main_data if "置入" not in r["主軸"])
     # 內文指名度 = 跳過(使用者填)
     kpi["內文指名度"] = None
     # 好評增加數 = 各列「正向聲量總數 - 正面討論」先逐列相減再加總
@@ -1073,8 +1086,7 @@ def _render_closure_preview(result, main_data, post_types):
         
         with st.expander("📐 計算明細"):
             st.write(f"- **網友回應數** = 網友回應量加總 = **{kpi['網友回應數']}**")
-            non_p = [r['主軸'] for r in main_data if "置入" not in r['主軸']]
-            st.write(f"- **議題曝光數** = 主軸非「置入」的列數 = **{kpi['議題曝光數']}**")
+            st.write(f"- **議題曝光數** = 你勾選之主軸的發文串數 = **{kpi['議題曝光數']}**")
             st.write(f"  非置入主軸明細: {non_p}")
             row_diffs = [(r['站版'][:20], r['正向聲量總數'], r['正面討論'], r['正向聲量總數']-r['正面討論']) for r in main_data]
             st.write(f"- **好評增加數** = 各列(正向聲量−正面討論)先計算再加總 = **{kpi['好評增加數']}**")
@@ -1424,7 +1436,35 @@ if pdf_file:
             st.subheader("👀 預覽計算結果")
             
             if report_type == "結案表":
-                result = calculate_all(main_data, post_types)
+                # === 主軸勾選(只影響 KPI 議題曝光數)===
+                # 從 main_data 抽出所有出現過的主軸,依「發文串數」排序
+                主軸統計 = {}
+                for r in main_data:
+                    axis = r["主軸"]
+                    主軸統計[axis] = 主軸統計.get(axis, 0) + 1
+                # 排序:發文多的在前
+                主軸清單_排序 = sorted(主軸統計.items(), key=lambda x: -x[1])
+                
+                # 預設勾選:非「置入」的主軸
+                預設勾選 = [axis for axis, _ in 主軸清單_排序 if "置入" not in axis]
+                
+                with st.expander("🎯 選擇要計入「議題曝光數」的主軸", expanded=True):
+                    st.caption("💡 議題曝光數 = 你勾選的主軸出現的**發文串數**。預設勾選「非置入」類主軸,你可以自行調整。")
+                    
+                    # 用 3 欄呈現 checkbox
+                    cols = st.columns(3)
+                    selected_axes = []
+                    for i, (axis, count) in enumerate(主軸清單_排序):
+                        with cols[i % 3]:
+                            default = axis in 預設勾選
+                            if st.checkbox(f"{axis} ({count} 串)", value=default, key=f"axis_{axis}"):
+                                selected_axes.append(axis)
+                    
+                    if not selected_axes:
+                        st.warning("⚠️ 未勾選任何主軸,議題曝光數會是 0")
+                
+                # 用選好的主軸計算
+                result = calculate_all(main_data, post_types, active_axes=selected_axes)
                 _render_closure_preview(result, main_data, post_types)
             else:
                 _render_monthly_preview(main_data, post_types)
