@@ -1087,7 +1087,6 @@ def _render_closure_preview(result, main_data, post_types):
         with st.expander("📐 計算明細"):
             st.write(f"- **網友回應數** = 網友回應量加總 = **{kpi['網友回應數']}**")
             st.write(f"- **議題曝光數** = 你勾選之主軸的發文串數 = **{kpi['議題曝光數']}**")
-            st.write(f"  非置入主軸明細: {non_p}")
             row_diffs = [(r['站版'][:20], r['正向聲量總數'], r['正面討論'], r['正向聲量總數']-r['正面討論']) for r in main_data]
             st.write(f"- **好評增加數** = 各列(正向聲量−正面討論)先計算再加總 = **{kpi['好評增加數']}**")
             with st.expander("查看每列計算"):
@@ -1437,15 +1436,23 @@ if pdf_file:
             
             if report_type == "結案表":
                 # === 主軸勾選(只影響 KPI 議題曝光數)===
-                # 從 main_data 抽出所有出現過的主軸,依「發文串數」排序
-                主軸統計 = {}
+                # 取「操作主軸表」的完整主軸清單(不論主表有沒有發文)
+                # 這樣即使某些主軸未有實際發文,使用者仍可勾選(供彈性操作)
+                所有主軸_from_table = get_main_category_from_pdf(pdf_path)
+                
+                # 統計每個主軸的發文串數
+                主軸統計 = {axis: 0 for axis in 所有主軸_from_table}
                 for r in main_data:
                     axis = r["主軸"]
-                    主軸統計[axis] = 主軸統計.get(axis, 0) + 1
-                # 排序:發文多的在前
-                主軸清單_排序 = sorted(主軸統計.items(), key=lambda x: -x[1])
+                    # 若主表中的主軸不在「操作主軸表」清單裡(罕見),也加進來
+                    if axis not in 主軸統計:
+                        主軸統計[axis] = 0
+                    主軸統計[axis] += 1
                 
-                # 預設勾選:非「置入」的主軸
+                # 排序:發文多的在前,發文=0 的排最後
+                主軸清單_排序 = sorted(主軸統計.items(), key=lambda x: (-x[1], x[0]))
+                
+                # 預設勾選:非「置入」的主軸(不論有沒有發文)
                 預設勾選 = [axis for axis, _ in 主軸清單_排序 if "置入" not in axis]
                 
                 with st.expander("🎯 選擇要計入「議題曝光數」的主軸", expanded=True):
@@ -1457,7 +1464,9 @@ if pdf_file:
                     for i, (axis, count) in enumerate(主軸清單_排序):
                         with cols[i % 3]:
                             default = axis in 預設勾選
-                            if st.checkbox(f"{axis} ({count} 串)", value=default, key=f"axis_{axis}"):
+                            # 沒發文的主軸標示灰色但仍可勾選
+                            label = f"{axis} ({count} 串)" if count > 0 else f"{axis} (0 串)"
+                            if st.checkbox(label, value=default, key=f"axis_{axis}"):
                                 selected_axes.append(axis)
                     
                     if not selected_axes:
