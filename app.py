@@ -97,6 +97,17 @@ ROW_PATTERN = re.compile(
 
 def get_main_category_from_pdf(pdf_path):
     """從 PDF「操作主軸」區塊抽出實際主軸全名清單(用文字解析,避免跨頁切表問題)"""
+    return [name for name, _ in get_main_category_with_counts(pdf_path)]
+
+
+def get_main_category_with_counts(pdf_path):
+    """從 PDF「操作主軸」區塊抽出主軸全名 + 累計串數
+    
+    回傳 [(主軸名, 累計串數), ...] 依 PDF 中的順序
+    
+    注意:PDF 上「操作主軸表」的「累計」欄是權威來源,直接使用它,
+    避免因主表跨頁破碎而漏抓主軸串數。
+    """
     with pdfplumber.open(pdf_path) as pdf:
         full_text = ""
         for page in pdf.pages:
@@ -129,6 +140,7 @@ def get_main_category_from_pdf(pdf_path):
         m = re.match(r'^(.+?)\s+(\d+)\s*$', line)
         if m:
             name = m.group(1).strip()
+            count = int(m.group(2))
             if name == "合計":
                 continue
             # 排除站版列、含百分比的列
@@ -136,7 +148,7 @@ def get_main_category_from_pdf(pdf_path):
                 continue
             if re.search(r'\d+\.\d+', line):
                 continue
-            extracted.append(name)
+            extracted.append((name, count))
     
     return extracted
 
@@ -485,14 +497,16 @@ def categorize_station(stb):
     return "其他版面"
 
 
-def calculate_all(main_data, post_types, active_axes=None):
+def calculate_all(main_data, post_types, active_axes=None, axis_counts=None):
     """計算所有要填入模板的數字
     
     Args:
         main_data: 主表資料
         post_types: 文案類型
-        active_axes: 若提供,則「議題曝光數」= 主軸在此清單內的列數(串數)。
-                     若 None,回傳所有可能的主軸清單,不強制篩選(用預設邏輯:非「置入」)。
+        active_axes: 使用者勾選的主軸清單(要計入「議題曝光數」)
+        axis_counts: dict {主軸名: 累計串數} — 來自 PDF「操作主軸表」的權威數字
+                     若提供,議題曝光數 = 勾選主軸的 axis_counts 加總
+                     若不提供,退回舊邏輯(以 main_data 列數計算)
     """
     result = {}
     
@@ -548,9 +562,13 @@ def calculate_all(main_data, post_types, active_axes=None):
     # 網友回應數 = 網友回應量整列加總
     kpi["網友回應數"] = sum(r["網友回應量"] for r in main_data)
     # 議題曝光數:
-    # - 若使用者有指定「主動主軸清單」,則計算「主軸在該清單內」的列數
-    # - 否則沿用預設邏輯:主軸不含「置入」的列數
-    if active_axes is not None:
+    # 優先使用 PDF「操作主軸表」的累計串數(權威來源,主表跨頁不影響)
+    # - 若提供 axis_counts + active_axes:議題曝光數 = 勾選主軸的 axis_counts 加總
+    # - 若只提供 active_axes:退回用 main_data 篩選(舊行為)
+    # - 都沒提供:預設邏輯(非「置入」的列數)
+    if axis_counts is not None and active_axes is not None:
+        kpi["議題曝光數"] = sum(axis_counts.get(a, 0) for a in active_axes)
+    elif active_axes is not None:
         active_set = set(active_axes)
         kpi["議題曝光數"] = sum(1 for r in main_data if r["主軸"] in active_set)
     else:
@@ -1436,27 +1454,27 @@ if pdf_file:
             
             if report_type == "結案表":
                 # === 主軸勾選(只影響 KPI 議題曝光數)===
-                # 取「操作主軸表」的完整主軸清單(不論主表有沒有發文)
-                # 這樣即使某些主軸未有實際發文,使用者仍可勾選(供彈性操作)
-                所有主軸_from_table = get_main_category_from_pdf(pdf_path)
+                # 【重要】用「操作主軸表」上的累計串數作為權威數字,
+                # 因為主表可能因跨頁切散而漏抓,而「操作主軸表」是 PDF 上明確標示的合計。
+                主軸_累計 = get_main_category_with_counts(pdf_path)
                 
-                # 統計每個主軸的發文串數
-                主軸統計 = {axis: 0 for axis in 所有主軸_from_table}
-                for r in main_data:
-                    axis = r["主軸"]
-                    # 若主表中的主軸不在「操作主軸表」清單裡(罕見),也加進來
-                    if axis not in 主軸統計:
-                        主軸統計[axis] = 0
-                    主軸統計[axis] += 1
+                # 若「操作主軸表」抽取失敗,fallback 用主表統計
+                if not 主軸_累計:
+                    主軸統計 = {}
+                    for r in main_data:
+                        主軸統計[r["主軸"]] = 主軸統計.get(r["主軸"], 0) + 1
+                    主軸_累計 = list(主軸統計.items())
                 
-                # 排序:發文多的在前,發文=0 的排最後
-                主軸清單_排序 = sorted(主軸統計.items(), key=lambda x: (-x[1], x[0]))
+                主軸_counts = dict(主軸_累計)
                 
-                # 預設勾選:非「置入」的主軸(不論有沒有發文)
+                # 排序:串數多的在前
+                主軸清單_排序 = sorted(主軸_累計, key=lambda x: (-x[1], x[0]))
+                
+                # 預設勾選:非「置入」的主軸
                 預設勾選 = [axis for axis, _ in 主軸清單_排序 if "置入" not in axis]
                 
                 with st.expander("🎯 選擇要計入「議題曝光數」的主軸", expanded=True):
-                    st.caption("💡 議題曝光數 = 你勾選的主軸出現的**發文串數**。預設勾選「非置入」類主軸,你可以自行調整。")
+                    st.caption("💡 議題曝光數 = 你勾選的主軸的**累計串數**(取自 PDF「操作主軸」表)。預設勾選「非置入」類主軸,你可以自行調整。")
                     
                     # 用 3 欄呈現 checkbox
                     cols = st.columns(3)
@@ -1464,16 +1482,20 @@ if pdf_file:
                     for i, (axis, count) in enumerate(主軸清單_排序):
                         with cols[i % 3]:
                             default = axis in 預設勾選
-                            # 沒發文的主軸標示灰色但仍可勾選
-                            label = f"{axis} ({count} 串)" if count > 0 else f"{axis} (0 串)"
+                            label = f"{axis} ({count} 串)"
                             if st.checkbox(label, value=default, key=f"axis_{axis}"):
                                 selected_axes.append(axis)
                     
                     if not selected_axes:
                         st.warning("⚠️ 未勾選任何主軸,議題曝光數會是 0")
                 
-                # 用選好的主軸計算
-                result = calculate_all(main_data, post_types, active_axes=selected_axes)
+                # 用選好的主軸 + 權威串數計算
+                # calculate_all 內會用 axis_counts 直接加總,不會受主表跨頁影響
+                result = calculate_all(
+                    main_data, post_types,
+                    active_axes=selected_axes,
+                    axis_counts=主軸_counts,
+                )
                 _render_closure_preview(result, main_data, post_types)
             else:
                 _render_monthly_preview(main_data, post_types)
