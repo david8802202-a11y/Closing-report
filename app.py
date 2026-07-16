@@ -1051,6 +1051,31 @@ def fill_template(template_path, calc_result):
         + 分布總和["產品討論"] + 分布總和["複合討論"]
     )
     
+    # === 重繪圓餅圖 ===
+    # 模板中圓餅圖原本指向 $D$4:$H$4 (類別軸) 跟 $D$14:$H$14 (數值)
+    # 但因為我們刪了列 10-13 + 部分空版面,總計列已不在列 14
+    # 需要用新的「總計列」位置重建 series
+    from openpyxl.chart.reference import Reference
+    from openpyxl.chart.data_source import AxDataSource, StrRef, NumRef, NumDataSource
+    from openpyxl.chart.series import Series
+    
+    for chart in ws3._charts:
+        # 數值範圍:新總計列 D-H 欄(正/負/議/產/複)
+        val_range = f"'網友回應分布'!$D${總計列}:$H${總計列}"
+        # 類別軸:列 4 D-H 欄(表頭文字)
+        cat_range = f"'網友回應分布'!$D$4:$H$4"
+        
+        # 直接改 series 內的 references(不用 add_data,避免拆成多 series 或誤判 str/num)
+        if chart.series:
+            ser = chart.series[0]
+            # 更新數值範圍
+            if ser.val and ser.val.numRef:
+                ser.val.numRef.f = val_range
+            # 更新類別軸(字串)
+            if ser.cat:
+                # 強制用 strRef(避免 numRef 把文字顯示成 0)
+                ser.cat = AxDataSource(strRef=StrRef(f=cat_range))
+    
     # 輸出到 bytes
     output = BytesIO()
     wb.save(output)
