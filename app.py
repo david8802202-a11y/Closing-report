@@ -1183,7 +1183,7 @@ def _render_closure_preview(result, main_data, post_types, selected_axes=None, a
         
         with st.expander("📐 計算明細"):
             st.write(f"- **網友回應數** = 網友回應量加總 = **{kpi['網友回應數']}**")
-            st.write(f"- **議題曝光數** = 你勾選之主軸的累計串數(取自 PDF 操作主軸表) = **{kpi['議題曝光數']}**")
+            st.write(f"- **議題曝光數** = 你勾選之主軸的討論串數 = **{kpi['議題曝光數']}**")
             if selected_axes and axis_counts:
                 st.write("  勾選主軸明細:")
                 for axis in selected_axes:
@@ -1539,16 +1539,12 @@ if pdf_file:
             
             if report_type == "結案表":
                 # === 主軸勾選(只影響 KPI 議題曝光數)===
-                # 【重要】用「操作主軸表」上的累計串數作為權威數字,
-                # 因為主表可能因跨頁切散而漏抓,而「操作主軸表」是 PDF 上明確標示的合計。
-                主軸_累計 = get_main_category_with_counts(pdf_path)
-                
-                # 若「操作主軸表」抽取失敗,fallback 用主表統計
-                if not 主軸_累計:
-                    主軸統計 = {}
-                    for r in main_data:
-                        主軸統計[r["主軸"]] = 主軸統計.get(r["主軸"], 0) + 1
-                    主軸_累計 = list(主軸統計.items())
+                # 議題曝光數 = 串數(main_data 中每列 = 一串),不是篇數
+                # 注意:PDF「操作主軸表」的「累計」欄是發文篇數加總,不是串數,所以不用它
+                主軸統計 = {}
+                for r in main_data:
+                    主軸統計[r["主軸"]] = 主軸統計.get(r["主軸"], 0) + 1
+                主軸_累計 = list(主軸統計.items())
                 
                 主軸_counts = dict(主軸_累計)
                 
@@ -1559,7 +1555,7 @@ if pdf_file:
                 預設勾選 = [axis for axis, _ in 主軸清單_排序 if "置入" not in axis]
                 
                 with st.expander("🎯 選擇要計入「議題曝光數」的主軸", expanded=True):
-                    st.caption("💡 議題曝光數 = 你勾選的主軸的**累計串數**(取自 PDF「操作主軸」表)。預設勾選「非置入」類主軸,你可以自行調整。")
+                    st.caption("💡 議題曝光數 = 你勾選的主軸的**討論串數**。預設勾選「非置入」類主軸,你可以自行調整。")
                     
                     # 用 3 欄呈現 checkbox
                     cols = st.columns(3)
@@ -1577,12 +1573,10 @@ if pdf_file:
                 # 從 PDF「專案執行進度摘要」抽保證網友回應數
                 保證回應數 = extract_guaranteed_reply(pdf_path)
                 
-                # 用選好的主軸 + 權威串數計算
-                # calculate_all 內會用 axis_counts 直接加總,不會受主表跨頁影響
+                # 用選好的主軸計算(串數 = main_data 列數)
                 result = calculate_all(
                     main_data, post_types,
                     active_axes=selected_axes,
-                    axis_counts=主軸_counts,
                     guaranteed_reply=保證回應數,
                 )
                 _render_closure_preview(result, main_data, post_types,
