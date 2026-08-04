@@ -153,6 +153,44 @@ def get_main_category_with_counts(pdf_path):
     return extracted
 
 
+def extract_guaranteed_reply(pdf_path):
+    """從 PDF「專案執行進度摘要」抽出「網友回應數」的預計完成數
+    
+    PDF 格式:
+      專案執行進度摘要
+      專案累計 預計完成 完成率
+      銀河發文量 X Y Z%
+      網友回應數 X Y Z%    ← 抽這一列的「預計完成」= Y
+      ...
+    
+    回傳 int 或 None(找不到)
+    """
+    with pdfplumber.open(pdf_path) as pdf:
+        full_text = ""
+        for page in pdf.pages:
+            full_text += unicodedata.normalize('NFKC', page.extract_text() or "") + "\n"
+    
+    # 找「網友回應數」那一列(在「專案執行進度摘要」區塊裡)
+    # 格式:「網友回應數 <累計> <預計完成> <完成率%>」
+    # 用 re 抓出「網友回應數」後面第二個數字
+    section_start = full_text.find("專案執行進度摘要")
+    if section_start < 0:
+        return None
+    # 限制搜尋範圍到下一個區段
+    section_end = len(full_text)
+    for marker in ["操作主軸", "專案聲量分佈", "網友關注度", "網友回應概況"]:
+        idx = full_text.find(marker, section_start + 10)
+        if 0 < idx < section_end:
+            section_end = idx
+    section = full_text[section_start:section_end]
+    
+    # 抓「網友回應數 <數字> <數字>」— 前面數字是累計,第二個是預計完成
+    m = re.search(r'網友回應數\s+(\d+)\s+(\d+)', section)
+    if m:
+        return int(m.group(2))
+    return None
+
+
 def resolve_main_category(prefix, full_names):
     """把截斷的主軸縮寫對應到完整名稱
     
@@ -497,7 +535,7 @@ def categorize_station(stb):
     return "其他版面"
 
 
-def calculate_all(main_data, post_types, active_axes=None, axis_counts=None):
+def calculate_all(main_data, post_types, active_axes=None, axis_counts=None, guaranteed_reply=None):
     """計算所有要填入模板的數字
     
     Args:
@@ -507,6 +545,8 @@ def calculate_all(main_data, post_types, active_axes=None, axis_counts=None):
         axis_counts: dict {主軸名: 累計串數} — 來自 PDF「操作主軸表」的權威數字
                      若提供,議題曝光數 = 勾選主軸的 axis_counts 加總
                      若不提供,退回舊邏輯(以 main_data 列數計算)
+        guaranteed_reply: 從 PDF「專案執行進度摘要」抽到的網友回應數「預計完成」(保證數)
+                          用於 KPI 說明欄「原保證 XX 篇」
     """
     result = {}
     
@@ -577,6 +617,8 @@ def calculate_all(main_data, post_types, active_axes=None, axis_counts=None):
     kpi["內文指名度"] = None
     # 好評增加數 = 各列「正向聲量總數 - 正面討論」先逐列相減再加總
     kpi["好評增加數"] = sum(r["正向聲量總數"] - r["正面討論"] for r in main_data)
+    # 保證網友回應數(PDF「專案執行進度摘要」中「網友回應數」列的「預計完成」)
+    kpi["保證網友回應數"] = guaranteed_reply
     result["KPI"] = kpi
     
     # ===== 工作表 3:網友回應分布 =====
@@ -978,6 +1020,18 @@ def fill_template(template_path, calc_result):
     ws2["D6"] = ""  # 清空,讓使用者自己填
     ws2["D7"] = f"{calc_result['KPI']['好評增加數']}篇"
     
+    # C4 說明:「銀河主動開題...原保證 XX 篇」
+    # 用從 PDF「專案執行進度摘要」抽到的預計完成數更新
+    保證數 = calc_result['KPI'].get("保證網友回應數")
+    if 保證數 is not None:
+        原C4 = ws2["C4"].value or ""
+        # 用 regex 替換「原保證 XX 篇」的數字
+        新C4 = re.sub(r'原保證\s*\d+\s*篇', f'原保證{保證數}篇', 原C4)
+        # 若找不到「原保證 X 篇」的字樣,也覆蓋整段(避免各種格式差異)
+        if 新C4 == 原C4:
+            新C4 = f"銀河主動開題及與置入後的真實網友回應原保證{保證數}篇"
+        ws2["C4"] = 新C4
+    
     # ----- 工作表 3:網友回應分布 -----
     ws3 = wb["網友回應分布"]
     # 列對應(已知模板:PTT=5列, Dcard=6列, Threads=7列, 其他=8列, FB=9列)
@@ -1106,7 +1160,7 @@ def convert_xls_to_xlsx(xls_bytes):
 
 # ==================== 預覽渲染輔助函式 ====================
 
-def _render_closure_preview(result, main_data, post_types):
+def _render_closure_preview(result, main_data, post_types, selected_axes=None, axis_counts=None):
     """渲染結案表預覽(4 個 tab)"""
     tab1, tab2, tab3, tab4 = st.tabs(["📑 篇數", "📈 KPI", "📊 網友回應分布", "📂 原始資料"])
     
@@ -1129,7 +1183,13 @@ def _render_closure_preview(result, main_data, post_types):
         
         with st.expander("📐 計算明細"):
             st.write(f"- **網友回應數** = 網友回應量加總 = **{kpi['網友回應數']}**")
-            st.write(f"- **議題曝光數** = 你勾選之主軸的發文串數 = **{kpi['議題曝光數']}**")
+            st.write(f"- **議題曝光數** = 你勾選之主軸的累計串數(取自 PDF 操作主軸表) = **{kpi['議題曝光數']}**")
+            if selected_axes and axis_counts:
+                st.write("  勾選主軸明細:")
+                for axis in selected_axes:
+                    count = axis_counts.get(axis, 0)
+                    st.write(f"  - {axis}: {count} 串")
+                st.write(f"  → 加總 = **{sum(axis_counts.get(a, 0) for a in selected_axes)}**")
             row_diffs = [(r['站版'][:20], r['正向聲量總數'], r['正面討論'], r['正向聲量總數']-r['正面討論']) for r in main_data]
             st.write(f"- **好評增加數** = 各列(正向聲量−正面討論)先計算再加總 = **{kpi['好評增加數']}**")
             with st.expander("查看每列計算"):
@@ -1514,14 +1574,20 @@ if pdf_file:
                     if not selected_axes:
                         st.warning("⚠️ 未勾選任何主軸,議題曝光數會是 0")
                 
+                # 從 PDF「專案執行進度摘要」抽保證網友回應數
+                保證回應數 = extract_guaranteed_reply(pdf_path)
+                
                 # 用選好的主軸 + 權威串數計算
                 # calculate_all 內會用 axis_counts 直接加總,不會受主表跨頁影響
                 result = calculate_all(
                     main_data, post_types,
                     active_axes=selected_axes,
                     axis_counts=主軸_counts,
+                    guaranteed_reply=保證回應數,
                 )
-                _render_closure_preview(result, main_data, post_types)
+                _render_closure_preview(result, main_data, post_types,
+                                         selected_axes=selected_axes,
+                                         axis_counts=主軸_counts)
             else:
                 _render_monthly_preview(main_data, post_types)
             
