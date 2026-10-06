@@ -3,3 +3,4 @@ pandas
 openpyxl
 pdfplumber
 xlrd
+python-docx
