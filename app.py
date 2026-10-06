@@ -1689,15 +1689,18 @@ if pdf_file:
 
                     # 渲染表單
                     try:
-                        from word_report import render_word_form, build_word_report
+                        from word_report import render_word_form, build_word_report, build_prompt_text
                         word_data = render_word_form(pdf_defaults)
 
                         if word_data:
+                            ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+                            # === 1. 生成 Word ===
                             with st.spinner("📝 生成 Word 報告中..."):
                                 try:
                                     word_bytes = build_word_report(word_data)
-                                    word_name = f"結案報告_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx"
-                                    st.success("✅ Word 報告已生成,點下方按鈕下載")
+                                    word_name = f"結案報告_{ts}.docx"
+                                    st.success("✅ Word 報告已生成")
                                     st.download_button(
                                         label=f"📥 下載 {word_name}",
                                         data=word_bytes,
@@ -1711,6 +1714,24 @@ if pdf_file:
                                     st.error(f"❌ Word 生成失敗:{e}")
                                     import traceback
                                     st.code(traceback.format_exc())
+
+                            # === 2. 生成結案指令詞(txt)===
+                            try:
+                                prompt_text = build_prompt_text(word_data)
+                                prompt_name = f"結案指令詞_{ts}.txt"
+                                st.success("✅ 結案指令詞已生成(給 Gamma / Claude 做簡報用)")
+                                st.download_button(
+                                    label=f"📝 下載 {prompt_name}",
+                                    data=prompt_text.encode('utf-8'),
+                                    file_name=prompt_name,
+                                    mime="text/plain",
+                                    use_container_width=True,
+                                    key="prompt_download",
+                                )
+                                with st.expander("👀 預覽結案指令詞內容"):
+                                    st.text(prompt_text)
+                            except Exception as e:
+                                st.error(f"❌ 結案指令詞生成失敗:{e}")
                     except ImportError:
                         st.error("❌ 找不到 word_report.py 模組,請確認檔案已上傳到 repo 根目錄")
             else:
