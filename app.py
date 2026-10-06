@@ -1183,7 +1183,7 @@ def _render_closure_preview(result, main_data, post_types, selected_axes=None, a
         
         with st.expander("📐 計算明細"):
             st.write(f"- **網友回應數** = 網友回應量加總 = **{kpi['網友回應數']}**")
-            st.write(f"- **議題曝光數** = 你勾選之主軸的討論串數 = **{kpi['議題曝光數']}**")
+            st.write(f"- **議題曝光數** = 你勾選之主軸的累計串數(取自 PDF 操作主軸表) = **{kpi['議題曝光數']}**")
             if selected_axes and axis_counts:
                 st.write("  勾選主軸明細:")
                 for axis in selected_axes:
@@ -1539,12 +1539,16 @@ if pdf_file:
             
             if report_type == "結案表":
                 # === 主軸勾選(只影響 KPI 議題曝光數)===
-                # 議題曝光數 = 串數(main_data 中每列 = 一串),不是篇數
-                # 注意:PDF「操作主軸表」的「累計」欄是發文篇數加總,不是串數,所以不用它
-                主軸統計 = {}
-                for r in main_data:
-                    主軸統計[r["主軸"]] = 主軸統計.get(r["主軸"], 0) + 1
-                主軸_累計 = list(主軸統計.items())
+                # 【重要】用「操作主軸表」上的累計串數作為權威數字,
+                # 因為主表可能因跨頁切散而漏抓,而「操作主軸表」是 PDF 上明確標示的合計。
+                主軸_累計 = get_main_category_with_counts(pdf_path)
+                
+                # 若「操作主軸表」抽取失敗,fallback 用主表統計
+                if not 主軸_累計:
+                    主軸統計 = {}
+                    for r in main_data:
+                        主軸統計[r["主軸"]] = 主軸統計.get(r["主軸"], 0) + 1
+                    主軸_累計 = list(主軸統計.items())
                 
                 主軸_counts = dict(主軸_累計)
                 
@@ -1555,7 +1559,7 @@ if pdf_file:
                 預設勾選 = [axis for axis, _ in 主軸清單_排序 if "置入" not in axis]
                 
                 with st.expander("🎯 選擇要計入「議題曝光數」的主軸", expanded=True):
-                    st.caption("💡 議題曝光數 = 你勾選的主軸的**討論串數**。預設勾選「非置入」類主軸,你可以自行調整。")
+                    st.caption("💡 議題曝光數 = 你勾選的主軸的**累計串數**(取自 PDF「操作主軸」表)。預設勾選「非置入」類主軸,你可以自行調整。")
                     
                     # 用 3 欄呈現 checkbox
                     cols = st.columns(3)
@@ -1573,10 +1577,12 @@ if pdf_file:
                 # 從 PDF「專案執行進度摘要」抽保證網友回應數
                 保證回應數 = extract_guaranteed_reply(pdf_path)
                 
-                # 用選好的主軸計算(串數 = main_data 列數)
+                # 用選好的主軸 + 權威串數計算
+                # calculate_all 內會用 axis_counts 直接加總,不會受主表跨頁影響
                 result = calculate_all(
                     main_data, post_types,
                     active_axes=selected_axes,
+                    axis_counts=主軸_counts,
                     guaranteed_reply=保證回應數,
                 )
                 _render_closure_preview(result, main_data, post_types,
@@ -1616,6 +1622,97 @@ if pdf_file:
                 st.info("💡 **提醒**:\n"
                         "- 工作表 KPI 的「內文指名度」需要您手動填入(用第 3 個功能查詢)\n"
                         "- 「網友回應分布」第一個區塊(第 4-13 列)未填,因模板註記為「系統抓取後手動處理」")
+
+                # ===== 新增:生成 Word 結案報告 =====
+                st.divider()
+                with st.expander("📄 生成 Word 結案報告(需補填部分欄位)", expanded=False):
+                    st.markdown("Word 報告包含 Excel 沒有的內容(聲量比較、正負評摘要、操作觀察等),需要你手動補填。")
+
+                    # 從 PDF 已算好的資料準備 defaults
+                    kpi_dict = result.get("KPI", {})
+                    篇數_dict = result.get("篇數", {})
+                    分布_dict = result.get("分布", {})
+
+                    # 執行篇數細項的描述字串(從篇數 dict 組)
+                    細項_parts = []
+                    for name, cnt in 篇數_dict.items():
+                        if cnt and cnt > 0:
+                            # 簡化顯示名稱
+                            short_name = name.split('(')[0].strip()
+                            細項_parts.append(f"{short_name} {cnt} 篇")
+                    總篇數 = sum(v for v in 篇數_dict.values() if isinstance(v, (int, float)))
+                    細項_desc = "、".join(細項_parts) + f",共計 {總篇數} 篇" if 細項_parts else f"共 {總篇數} 篇"
+
+                    # 組 KPI 列表(給 Word 用)
+                    保證數 = kpi_dict.get("保證網友回應數") or 52
+                    word_kpi = [
+                        {"項目": "網友回應數", "說明": f"開題與置入真實回應(原保證{保證數}篇)", "達成": f"{kpi_dict.get('網友回應數', 0)}篇"},
+                        {"項目": "議題曝光數", "說明": "主動開題經營串數", "達成": f"{kpi_dict.get('議題曝光數', 0)}串"},
+                        {"項目": "內文指名度", "說明": "提及品牌篇數", "達成": "(手動填)"},
+                        {"項目": "好評增加數", "說明": "品牌正面好評篇數(含PTT/Dcard/Threads/社團)", "達成": f"{kpi_dict.get('好評增加數', 0)}篇"},
+                    ]
+
+                    # 組分布表(含總計列)
+                    word_分布 = []
+                    總_實際, 總_正, 總_負, 總_議, 總_產, 總_複, 總_小計 = 0, 0, 0, 0, 0, 0, 0
+                    for cat_name in ["PTT", "Dcard", "Threads", "其他版面", "FB社團"]:
+                        d = 分布_dict.get(cat_name, {})
+                        if not d: continue
+                        實際 = d.get("實際溝通", 0)
+                        正 = d.get("正面討論", 0); 負 = d.get("負面討論", 0)
+                        議 = d.get("議題討論", 0); 產 = d.get("產品討論", 0); 複 = d.get("複合討論", 0)
+                        小計 = 正 + 負 + 議 + 產 + 複
+                        if 實際 == 0 and 小計 == 0:
+                            continue  # 整列 0 就不列
+                        word_分布.append({
+                            "版面": cat_name, "實際溝通": 實際, "正面": 正, "負面": 負,
+                            "議題": 議, "產品": 產, "複合": 複, "小計": 小計,
+                        })
+                        總_實際 += 實際; 總_正 += 正; 總_負 += 負; 總_議 += 議
+                        總_產 += 產; 總_複 += 複; 總_小計 += 小計
+                    word_分布.append({
+                        "版面": "總計", "實際溝通": 總_實際, "正面": 總_正, "負面": 總_負,
+                        "議題": 總_議, "產品": 總_產, "複合": 總_複, "小計": 總_小計,
+                    })
+
+                    pdf_defaults = {
+                        '執行篇數細項': 細項_desc,
+                        '預計執行篇數': 總篇數,
+                        '實際執行篇數': 總篇數,
+                        '達成率': "100%",
+                        'KPI': word_kpi,
+                        '實際溝通量': 總篇數,
+                        '保證網友回應數': 保證數,
+                        '實際回應數': kpi_dict.get('網友回應數', 0),
+                        '分布表': word_分布,
+                    }
+
+                    # 渲染表單
+                    try:
+                        from word_report import render_word_form, build_word_report
+                        word_data = render_word_form(pdf_defaults)
+
+                        if word_data:
+                            with st.spinner("📝 生成 Word 報告中..."):
+                                try:
+                                    word_bytes = build_word_report(word_data)
+                                    word_name = f"結案報告_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx"
+                                    st.success("✅ Word 報告已生成,點下方按鈕下載")
+                                    st.download_button(
+                                        label=f"📥 下載 {word_name}",
+                                        data=word_bytes,
+                                        file_name=word_name,
+                                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                        use_container_width=True,
+                                        type="primary",
+                                        key="word_download",
+                                    )
+                                except Exception as e:
+                                    st.error(f"❌ Word 生成失敗:{e}")
+                                    import traceback
+                                    st.code(traceback.format_exc())
+                    except ImportError:
+                        st.error("❌ 找不到 word_report.py 模組,請確認檔案已上傳到 repo 根目錄")
             else:
                 st.info("💡 **提醒**:\n"
                         "- 「整體口碑操作議題方向」、「網友正評/負評/複合討論」需要您手動填入\n"
