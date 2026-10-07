@@ -537,14 +537,14 @@ def categorize_station(stb):
 
 def calculate_all(main_data, post_types, active_axes=None, axis_counts=None, guaranteed_reply=None):
     """計算所有要填入模板的數字
-    
+
     Args:
-        main_data: 主表資料
+        main_data: 主表資料(每列有「主軸」「專案發文量」等欄位)
         post_types: 文案類型
         active_axes: 使用者勾選的主軸清單(要計入「議題曝光數」)
-        axis_counts: dict {主軸名: 累計串數} — 來自 PDF「操作主軸表」的權威數字
-                     若提供,議題曝光數 = 勾選主軸的 axis_counts 加總
-                     若不提供,退回舊邏輯(以 main_data 列數計算)
+        axis_counts: 保留參數(為舊呼叫相容),目前未使用 —
+                     議題曝光數改為以主表「專案發文量(則數)」加總,
+                     不再使用 PDF 操作主軸表的累計串數
         guaranteed_reply: 從 PDF「專案執行進度摘要」抽到的網友回應數「預計完成」(保證數)
                           用於 KPI 說明欄「原保證 XX 篇」
     """
@@ -601,18 +601,14 @@ def calculate_all(main_data, post_types, active_axes=None, axis_counts=None, gua
     kpi = {}
     # 網友回應數 = 網友回應量整列加總
     kpi["網友回應數"] = sum(r["網友回應量"] for r in main_data)
-    # 議題曝光數:
-    # 優先使用 PDF「操作主軸表」的累計串數(權威來源,主表跨頁不影響)
-    # - 若提供 axis_counts + active_axes:議題曝光數 = 勾選主軸的 axis_counts 加總
-    # - 若只提供 active_axes:退回用 main_data 篩選(舊行為)
-    # - 都沒提供:預設邏輯(非「置入」的列數)
-    if axis_counts is not None and active_axes is not None:
-        kpi["議題曝光數"] = sum(axis_counts.get(a, 0) for a in active_axes)
-    elif active_axes is not None:
+    # 議題曝光數 = 勾選主軸的「專案發文量(則數)」加總
+    # 注意:不是用 PDF「操作主軸表」的累計串數(那是標題去重後的串數,
+    # 同一標題多則發文會被算成 1 串),而是直接把主表每列的「專案發文量」加起來
+    if active_axes is not None:
         active_set = set(active_axes)
-        kpi["議題曝光數"] = sum(1 for r in main_data if r["主軸"] in active_set)
+        kpi["議題曝光數"] = sum(r["專案發文量"] for r in main_data if r["主軸"] in active_set)
     else:
-        kpi["議題曝光數"] = sum(1 for r in main_data if "置入" not in r["主軸"])
+        kpi["議題曝光數"] = sum(r["專案發文量"] for r in main_data if "置入" not in r["主軸"])
     # 內文指名度 = 跳過(使用者填)
     kpi["內文指名度"] = None
     # 好評增加數 = 各列「正向聲量總數 - 正面討論」先逐列相減再加總
@@ -1183,13 +1179,15 @@ def _render_closure_preview(result, main_data, post_types, selected_axes=None, a
         
         with st.expander("📐 計算明細"):
             st.write(f"- **網友回應數** = 網友回應量加總 = **{kpi['網友回應數']}**")
-            st.write(f"- **議題曝光數** = 你勾選之主軸的累計串數(取自 PDF 操作主軸表) = **{kpi['議題曝光數']}**")
-            if selected_axes and axis_counts:
-                st.write("  勾選主軸明細:")
+            st.write(f"- **議題曝光數** = 你勾選之主軸的「專案發文量(則數)」加總 = **{kpi['議題曝光數']}**")
+            if selected_axes:
+                active_set = set(selected_axes)
+                st.write("  勾選主軸明細(主表每列的專案發文量):")
                 for axis in selected_axes:
-                    count = axis_counts.get(axis, 0)
-                    st.write(f"  - {axis}: {count} 串")
-                st.write(f"  → 加總 = **{sum(axis_counts.get(a, 0) for a in selected_axes)}**")
+                    rows_in_axis = [r for r in main_data if r["主軸"] == axis]
+                    axis_sum = sum(r["專案發文量"] for r in rows_in_axis)
+                    st.write(f"  - {axis}: {axis_sum} 則(共 {len(rows_in_axis)} 列)")
+                st.write(f"  → 加總 = **{sum(r['專案發文量'] for r in main_data if r['主軸'] in active_set)}**")
             row_diffs = [(r['站版'][:20], r['正向聲量總數'], r['正面討論'], r['正向聲量總數']-r['正面討論']) for r in main_data]
             st.write(f"- **好評增加數** = 各列(正向聲量−正面討論)先計算再加總 = **{kpi['好評增加數']}**")
             with st.expander("查看每列計算"):
@@ -1329,7 +1327,7 @@ with st.sidebar:
         
         **工作表 2 - KPI**
         - 網友回應數 = 網友回應量加總
-        - 議題曝光數 = 主軸非「置入」的列數
+        - 議題曝光數 = 你勾選主軸的「專案發文量(則數)」加總
         - 內文指名度 = 留空(手動填)
         - 好評增加數 = 各列(正向聲量−正面討論)加總
         
@@ -1558,16 +1556,22 @@ if pdf_file:
                 # 預設勾選:非「置入」的主軸
                 預設勾選 = [axis for axis, _ in 主軸清單_排序 if "置入" not in axis]
                 
+                # 以主表的「專案發文量」加總為每個主軸的則數(讓勾選標籤顯示實際則數)
+                主軸_則數 = {}
+                for r in main_data:
+                    主軸_則數[r["主軸"]] = 主軸_則數.get(r["主軸"], 0) + r["專案發文量"]
+
                 with st.expander("🎯 選擇要計入「議題曝光數」的主軸", expanded=True):
-                    st.caption("💡 議題曝光數 = 你勾選的主軸的**累計串數**(取自 PDF「操作主軸」表)。預設勾選「非置入」類主軸,你可以自行調整。")
-                    
+                    st.caption("💡 議題曝光數 = 你勾選的主軸的「專案發文量(則數)」加總,直接看主表每列的實際發文則數,不是去重後的串數。預設勾選「非置入」類主軸,你可以自行調整。")
+
                     # 用 3 欄呈現 checkbox
                     cols = st.columns(3)
                     selected_axes = []
                     for i, (axis, count) in enumerate(主軸清單_排序):
                         with cols[i % 3]:
                             default = axis in 預設勾選
-                            label = f"{axis} ({count} 串)"
+                            則數 = 主軸_則數.get(axis, 0)
+                            label = f"{axis} ({則數} 則)"
                             if st.checkbox(label, value=default, key=f"axis_{axis}"):
                                 selected_axes.append(axis)
                     
@@ -1577,8 +1581,7 @@ if pdf_file:
                 # 從 PDF「專案執行進度摘要」抽保證網友回應數
                 保證回應數 = extract_guaranteed_reply(pdf_path)
                 
-                # 用選好的主軸 + 權威串數計算
-                # calculate_all 內會用 axis_counts 直接加總,不會受主表跨頁影響
+                # 用選好的主軸計算,議題曝光數 = 主表「專案發文量(則數)」加總
                 result = calculate_all(
                     main_data, post_types,
                     active_axes=selected_axes,
