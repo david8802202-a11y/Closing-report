@@ -1706,46 +1706,72 @@ if pdf_file:
                         from word_report import render_word_form, build_word_report, build_prompt_text
                         word_data = render_word_form(pdf_defaults)
 
+                        # 當使用者剛按下「📄 生成 Word 報告」:生成內容並存進 session_state
+                        # (下載按鈕的點擊會觸發 rerun,word_data 會變回 None,
+                        #  但 session_state 的快取還在,下載按鈕能持續顯示)
                         if word_data:
                             ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-
-                            # === 1. 生成 Word ===
-                            with st.spinner("📝 生成 Word 報告中..."):
+                            with st.spinner("📝 生成 Word 報告 + 結案指令詞中..."):
                                 try:
                                     word_bytes = build_word_report(word_data)
-                                    word_name = f"結案報告_{ts}.docx"
-                                    st.success("✅ Word 報告已生成")
-                                    st.download_button(
-                                        label=f"📥 下載 {word_name}",
-                                        data=word_bytes,
-                                        file_name=word_name,
-                                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                                        use_container_width=True,
-                                        type="primary",
-                                        key="word_download",
-                                    )
+                                    st.session_state["generated_word"] = {
+                                        "bytes": word_bytes,
+                                        "name": f"結案報告_{ts}.docx",
+                                    }
                                 except Exception as e:
+                                    st.session_state["generated_word"] = None
                                     st.error(f"❌ Word 生成失敗:{e}")
                                     import traceback
                                     st.code(traceback.format_exc())
 
-                            # === 2. 生成結案指令詞(txt)===
-                            try:
-                                prompt_text = build_prompt_text(word_data)
-                                prompt_name = f"結案指令詞_{ts}.txt"
-                                st.success("✅ 結案指令詞已生成(給 Gamma / Claude 做簡報用)")
-                                st.download_button(
-                                    label=f"📝 下載 {prompt_name}",
-                                    data=prompt_text.encode('utf-8'),
-                                    file_name=prompt_name,
-                                    mime="text/plain",
-                                    use_container_width=True,
-                                    key="prompt_download",
-                                )
-                                with st.expander("👀 預覽結案指令詞內容"):
-                                    st.text(prompt_text)
-                            except Exception as e:
-                                st.error(f"❌ 結案指令詞生成失敗:{e}")
+                                try:
+                                    prompt_text = build_prompt_text(word_data)
+                                    st.session_state["generated_prompt"] = {
+                                        "text": prompt_text,
+                                        "name": f"結案指令詞_{ts}.txt",
+                                    }
+                                except Exception as e:
+                                    st.session_state["generated_prompt"] = None
+                                    st.error(f"❌ 結案指令詞生成失敗:{e}")
+
+                        # === 顯示下載按鈕(從 session_state 讀,rerun 不會消失)===
+                        gw = st.session_state.get("generated_word")
+                        gp = st.session_state.get("generated_prompt")
+
+                        if gw or gp:
+                            st.markdown("---")
+                            st.markdown("### 📦 可下載檔案")
+
+                        if gw:
+                            st.success(f"✅ Word 報告已生成:{gw['name']}")
+                            st.download_button(
+                                label=f"📥 下載 {gw['name']}",
+                                data=gw['bytes'],
+                                file_name=gw['name'],
+                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                use_container_width=True,
+                                type="primary",
+                                key="word_download",
+                            )
+
+                        if gp:
+                            st.success(f"✅ 結案指令詞已生成:{gp['name']}(給 Gamma / Claude 做簡報用)")
+                            st.download_button(
+                                label=f"📝 下載 {gp['name']}",
+                                data=gp['text'].encode('utf-8'),
+                                file_name=gp['name'],
+                                mime="text/plain",
+                                use_container_width=True,
+                                key="prompt_download",
+                            )
+                            with st.expander("👀 預覽結案指令詞內容"):
+                                st.text(gp['text'])
+
+                        if gw or gp:
+                            if st.button("🗑 清除上次生成的檔案", key="clear_generated"):
+                                st.session_state["generated_word"] = None
+                                st.session_state["generated_prompt"] = None
+                                st.rerun()
                     except ImportError:
                         st.error("❌ 找不到 word_report.py 模組,請確認檔案已上傳到 repo 根目錄")
             else:
