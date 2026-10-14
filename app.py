@@ -1716,7 +1716,7 @@ if pdf_file:
                                     word_bytes = build_word_report(word_data)
                                     st.session_state["generated_word"] = {
                                         "bytes": word_bytes,
-                                        "name": f"結案報告_{ts}.docx",
+                                        "name": f"結案資訊整理_{ts}.docx",
                                     }
                                 except Exception as e:
                                     st.session_state["generated_word"] = None
