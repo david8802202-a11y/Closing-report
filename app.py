@@ -7,6 +7,7 @@ PDF → 報表填充器(主入口)
 """
 import os
 import re
+import subprocess
 import tempfile
 import unicodedata
 from datetime import datetime

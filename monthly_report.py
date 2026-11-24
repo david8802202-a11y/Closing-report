@@ -9,8 +9,11 @@ from typing import Optional
 
 from docx import Document
 from openpyxl import load_workbook
+import streamlit as st
+import pandas as pd
 
 from docx_utils import (
+    normalize,
     _sanitize_data, _sanitize_str,
     _replace_paragraph_text, _replace_paragraph_text_or_add,
     _insert_paragraph_after, _remove_paragraph, _set_cell_text,

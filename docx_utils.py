@@ -1,16 +1,28 @@
 """共用 Word 處理工具 — 給 closure_report.py 和 monthly_report.py 用
 
 內容:
+- 文字正規化 normalize(去空白、Unicode NFKC)
 - XML 控制字元清理(_sanitize_data/_sanitize_str)
 - 段落操作(_replace_paragraph_text、_insert_paragraph_after、_remove_paragraph)
 - 儲存格操作(_set_cell_text)
 - 日期工具(_minus_months、_count_business_days、_TW_HOLIDAYS)
 """
 import re
+import unicodedata
 from copy import deepcopy
 from datetime import date, timedelta
 
 from docx.oxml.ns import qn
+
+
+# ==================== 文字正規化 ====================
+def normalize(s):
+    """去空白、Unicode 正規化(把 ⽂→文 等異體字統一)"""
+    if s is None:
+        return ""
+    s = str(s)
+    s = unicodedata.normalize('NFKC', s)
+    return re.sub(r'\s+', '', s)
 
 
 # ==================== XML 字元清理 ====================

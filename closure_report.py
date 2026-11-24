@@ -13,8 +13,11 @@ from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
+import streamlit as st
+import pandas as pd
 
 from docx_utils import (
+    normalize,
     _sanitize_data, _sanitize_str,
     _replace_paragraph_text, _replace_paragraph_text_or_add,
     _insert_paragraph_after, _remove_paragraph, _set_cell_text,
