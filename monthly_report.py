@@ -268,11 +268,69 @@ def build_monthly_report(data: dict) -> bytes:
     # paras[57-58] 下階段方向 bullets
     _fill_bullet_slots(paras, [57, 58], data.get("下階段方向", []))
 
+    # ========== Section 6:各品牌聲量分析(附加在 Word 尾端)==========
+    _append_brand_analysis(doc, data)
+
     # 輸出
     bio = io.BytesIO()
     doc.save(bio)
     bio.seek(0)
     return bio.read()
+
+
+def _append_brand_analysis(doc, data):
+    """在 Word 最尾端附加「各品牌聲量分析」區段:
+    各品牌下方列正評 / 負評 / 整體分析
+    """
+    def any_has(brand_prefix):
+        return (data.get(f"{brand_prefix}_正評")
+                or data.get(f"{brand_prefix}_負評")
+                or data.get(f"{brand_prefix}_整體分析"))
+
+    # 任何一個品牌有填分析才附加這個區段(避免整段空的)
+    if not (any_has("自品") or any_has("競品A") or any_has("競品B")):
+        return
+
+    doc.add_paragraph()  # 空行
+    heading = doc.add_paragraph()
+    heading_run = heading.add_run("各品牌聲量分析")
+    heading_run.bold = True
+    heading_run.font.size = None  # 保留預設大小
+
+    brands = [
+        ("自品", data.get("聲量_自品名稱", "AAA自品"), "自品"),
+        ("競品 A", data.get("聲量_競品A名稱", "BBB競品"), "競品A"),
+        ("競品 B", data.get("聲量_競品B名稱", "CCC競品"), "競品B"),
+    ]
+
+    for label, brand_name, key_prefix in brands:
+        正評 = data.get(f"{key_prefix}_正評", [])
+        負評 = data.get(f"{key_prefix}_負評", [])
+        整體 = data.get(f"{key_prefix}_整體分析", "")
+        # 該品牌沒任何分析內容就跳過
+        if not (正評 or 負評 or 整體):
+            continue
+
+        # 品牌小標
+        p = doc.add_paragraph()
+        r = p.add_run(f"◆ {label}({brand_name})")
+        r.bold = True
+
+        if 正評:
+            doc.add_paragraph("正評摘要:")
+            for line in 正評:
+                doc.add_paragraph(f"  - {line}")
+
+        if 負評:
+            doc.add_paragraph("負評摘要:")
+            for line in 負評:
+                doc.add_paragraph(f"  - {line}")
+
+        if 整體:
+            doc.add_paragraph("整體分析:")
+            doc.add_paragraph(f"  {整體}")
+
+        doc.add_paragraph()  # 品牌之間空一行
 
 
 def _fill_bullet_slots(paras, slot_indices, lines):
@@ -386,6 +444,10 @@ def render_monthly_form(pdf_defaults: dict) -> Optional[dict]:
             "自品_name": "", "自品_前": 0, "自品_後": 0, "自品_platforms": "",
             "cA_name": "", "cA_前": 0, "cA_後": 0, "cA_platforms": "",
             "cB_name": "", "cB_前": 0, "cB_後": 0, "cB_platforms": "",
+            # 各品牌聲量分析(正評/負評/整體,不含文字雲圖和文字雲分析)
+            "自品_正評_text": "", "自品_負評_text": "", "自品_整體分析": "",
+            "cA_正評_text": "", "cA_負評_text": "", "cA_整體分析": "",
+            "cB_正評_text": "", "cB_負評_text": "", "cB_整體分析": "",
             # 文字區塊
             "議題操作方向_text": "",
             "正面_1_標題": "", "正面_1_bullets_text": "",
@@ -483,8 +545,50 @@ def render_monthly_form(pdf_defaults: dict) -> Optional[dict]:
             v_cB_platforms = st.text_input("主要聲量集中版面", value=fd["cB_platforms"], placeholder="Threads", key="mf_cB_platforms")
             st.caption(f"✨ 預覽:成長數 = **{prev_cB_成長數} 篇** | 成長率 = **{prev_cB_率}**")
 
-        # ----- 區塊 3:專案執行概況 - 議題操作方向 + 正負面討論 -----
-        with st.expander("③ 專案執行概況", expanded=False):
+        # ----- 區塊 3:各品牌聲量分析(正評 / 負評 / 整體)-----
+        with st.expander("③ 各品牌聲量分析(正評 / 負評 / 整體)", expanded=False):
+            st.caption("💡 每個品牌填正評摘要、負評摘要、整體分析。正負評一行一則,行數不限。")
+
+            st.markdown("**自品聲量分析**")
+            v_自品_正評 = st.text_area(
+                "自品 — 正評摘要(一行一則)",
+                value=fd["自品_正評_text"], height=100,
+                placeholder="做完明顯有感\n網友主動推薦\n...",
+                key="mf_自品_正評",
+            )
+            v_自品_負評 = st.text_area(
+                "自品 — 負評摘要(一行一則)",
+                value=fd["自品_負評_text"], height=100,
+                key="mf_自品_負評",
+            )
+            v_自品_整體 = st.text_area(
+                "自品 — 整體分析", value=fd["自品_整體分析"],
+                height=70, placeholder="整體以XXXXX為主,網友關注在...",
+                key="mf_自品_整體",
+            )
+
+            st.markdown("---")
+            st.markdown("**競品 A 聲量分析**")
+            v_cA_正評 = st.text_area("競品 A — 正評摘要(一行一則)",
+                                       value=fd["cA_正評_text"], height=100, key="mf_cA_正評")
+            v_cA_負評 = st.text_area("競品 A — 負評摘要(一行一則)",
+                                       value=fd["cA_負評_text"], height=100, key="mf_cA_負評")
+            v_cA_整體 = st.text_area("競品 A — 整體分析",
+                                       value=fd["cA_整體分析"], height=70,
+                                       placeholder="整體以XXXXX為主", key="mf_cA_整體")
+
+            st.markdown("---")
+            st.markdown("**競品 B 聲量分析**")
+            v_cB_正評 = st.text_area("競品 B — 正評摘要(一行一則)",
+                                       value=fd["cB_正評_text"], height=100, key="mf_cB_正評")
+            v_cB_負評 = st.text_area("競品 B — 負評摘要(一行一則)",
+                                       value=fd["cB_負評_text"], height=100, key="mf_cB_負評")
+            v_cB_整體 = st.text_area("競品 B — 整體分析",
+                                       value=fd["cB_整體分析"], height=70,
+                                       placeholder="整體以XXXXX為主", key="mf_cB_整體")
+
+        # ----- 區塊 4:專案執行概況 - 議題操作方向 + 正負面討論 -----
+        with st.expander("④ 專案執行概況", expanded=False):
             st.caption("每一行一點。正/負面討論各可填 2 個主題(標題 + 多點描述)")
 
             v_議題操作方向 = st.text_area(
@@ -522,7 +626,7 @@ def render_monthly_form(pdf_defaults: dict) -> Optional[dict]:
                 v_neg2_bullets = st.text_area("主題 2 討論點(一行一點)", value=fd["負面_2_bullets_text"], height=80, key="mf_neg2_b")
 
         # ----- 區塊 4:網友熱門回應議題(文字) -----
-        with st.expander("④ 網友熱門回應議題 — 文字描述", expanded=False):
+        with st.expander("⑤ 網友熱門回應議題 — 文字描述", expanded=False):
             st.caption("「以下二則議題回應最為熱烈」下方的 2 條熱門回應描述。各版面回應分佈表會從 PDF 自動帶,不用手填。")
             v_熱門回應 = st.text_area(
                 "熱門回應描述(一行一則,不用加 - 開頭)",
@@ -531,7 +635,7 @@ def render_monthly_form(pdf_defaults: dict) -> Optional[dict]:
             )
 
         # ----- 區塊 5:操作觀察與下階段方向 -----
-        with st.expander("⑤ 操作觀察與下階段方向", expanded=False):
+        with st.expander("⑥ 操作觀察與下階段方向", expanded=False):
             v_操作觀察 = st.text_area(
                 "1. 操作觀察(一行一點)",
                 value=fd["操作觀察_text"], height=120,
@@ -576,6 +680,16 @@ def render_monthly_form(pdf_defaults: dict) -> Optional[dict]:
         fd["cB_前"] = int(v_cB_前 or 0)
         fd["cB_後"] = int(v_cB_後 or 0)
         fd["cB_platforms"] = v_cB_platforms
+        # 各品牌聲量分析
+        fd["自品_正評_text"] = v_自品_正評
+        fd["自品_負評_text"] = v_自品_負評
+        fd["自品_整體分析"] = v_自品_整體
+        fd["cA_正評_text"] = v_cA_正評
+        fd["cA_負評_text"] = v_cA_負評
+        fd["cA_整體分析"] = v_cA_整體
+        fd["cB_正評_text"] = v_cB_正評
+        fd["cB_負評_text"] = v_cB_負評
+        fd["cB_整體分析"] = v_cB_整體
         fd["議題操作方向_text"] = v_議題操作方向
         fd["正面_1_標題"] = v_pos1_title
         fd["正面_1_bullets_text"] = v_pos1_bullets
@@ -631,6 +745,17 @@ def render_monthly_form(pdf_defaults: dict) -> Optional[dict]:
         "聲量_競品A成長數": cA_成長數, "聲量_競品A成長率": cA_率, "聲量_競品A集中版面": fd["cA_platforms"],
         "聲量_競品B名稱": fd["cB_name"], "聲量_競品B_前": fd["cB_前"], "聲量_競品B_後": fd["cB_後"],
         "聲量_競品B成長數": cB_成長數, "聲量_競品B成長率": cB_率, "聲量_競品B集中版面": fd["cB_platforms"],
+
+        # 各品牌聲量分析
+        "自品_正評": split_lines(fd["自品_正評_text"]),
+        "自品_負評": split_lines(fd["自品_負評_text"]),
+        "自品_整體分析": fd["自品_整體分析"],
+        "競品A_正評": split_lines(fd["cA_正評_text"]),
+        "競品A_負評": split_lines(fd["cA_負評_text"]),
+        "競品A_整體分析": fd["cA_整體分析"],
+        "競品B_正評": split_lines(fd["cB_正評_text"]),
+        "競品B_負評": split_lines(fd["cB_負評_text"]),
+        "競品B_整體分析": fd["cB_整體分析"],
 
         # 專案執行進度(從 PDF)
         "專案發文量_細項": pdf_defaults.get('專案發文量_細項', ''),
