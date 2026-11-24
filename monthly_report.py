@@ -268,11 +268,44 @@ def build_monthly_report(data: dict) -> bytes:
     # paras[57-58] 下階段方向 bullets
     _fill_bullet_slots(paras, [57, 58], data.get("下階段方向", []))
 
+    # ========== 附加:聲量特徵解析(對應 PPT p.5 的品牌分析)==========
+    _append_brand_sound_analysis(doc, data)
+
     # 輸出
     bio = io.BytesIO()
     doc.save(bio)
     bio.seek(0)
     return bio.read()
+
+
+def _append_brand_sound_analysis(doc, data):
+    """在 Word 最尾端附加「聲量特徵解析」:每品牌一段自由描述。
+    任一品牌沒填就跳過該品牌;三個都沒填就整段不出現。
+    """
+    自品分析 = data.get("聲量_自品_分析", "").strip()
+    cA分析 = data.get("聲量_競品A_分析", "").strip()
+    cB分析 = data.get("聲量_競品B_分析", "").strip()
+
+    if not (自品分析 or cA分析 or cB分析):
+        return
+
+    doc.add_paragraph()  # 空行
+    heading = doc.add_paragraph()
+    r = heading.add_run("聲量特徵解析")
+    r.bold = True
+
+    brands = [
+        (data.get("聲量_自品名稱", "AAA自品"), "自品", 自品分析),
+        (data.get("聲量_競品A名稱", "BBB競品"), "競品 A", cA分析),
+        (data.get("聲量_競品B名稱", "CCC競品"), "競品 B", cB分析),
+    ]
+    for brand_name, label, 分析 in brands:
+        if not 分析:
+            continue
+        p = doc.add_paragraph()
+        r = p.add_run(f"【{brand_name}({label})】")
+        r.bold = True
+        p.add_run(分析)
 
 
 def _fill_bullet_slots(paras, slot_indices, lines):
@@ -385,6 +418,8 @@ def render_monthly_form(pdf_defaults: dict) -> Optional[dict]:
         "自品_name": "", "自品_前": 0, "自品_後": 0, "自品_platforms": "",
         "cA_name": "", "cA_前": 0, "cA_後": 0, "cA_platforms": "",
         "cB_name": "", "cB_前": 0, "cB_後": 0, "cB_platforms": "",
+        # 聲量特徵解析(每品牌一段自由描述,對應 PPT p.5)
+        "自品_聲量分析": "", "cA_聲量分析": "", "cB_聲量分析": "",
         # 文字區塊
         "議題操作方向_text": "",
         "正面_1_標題": "", "正面_1_bullets_text": "",
@@ -471,6 +506,12 @@ def render_monthly_form(pdf_defaults: dict) -> Optional[dict]:
             with a2: v_自品_後 = _num("專案後聲量(篇)", fd["自品_後"], "mf_自品_後")
             v_自品_platforms = st.text_input("主要聲量集中版面", value=fd["自品_platforms"], placeholder="Threads、Dcard", key="mf_自品_platforms")
             st.caption(f"✨ 預覽:成長數 = **{prev_自品_成長數} 篇** | 成長率 = **{prev_自品_率}**")
+            v_自品_聲量分析 = st.text_area(
+                "自品 — 聲量特徵解析",
+                value=fd["自品_聲量分析"], height=110,
+                placeholder="例:本期聲量 63 則,幾乎全部來自 Threads,網友普遍肯定「每股 0.1 美元無低消」...",
+                key="mf_自品_聲量分析",
+            )
 
             st.markdown("**競品 A**")
             ba0, ba1, ba2 = st.columns(3)
@@ -479,6 +520,12 @@ def render_monthly_form(pdf_defaults: dict) -> Optional[dict]:
             with ba2: v_cA_後 = _num("專案後聲量(篇)", fd["cA_後"], "mf_cA_後")
             v_cA_platforms = st.text_input("主要聲量集中版面", value=fd["cA_platforms"], placeholder="Threads", key="mf_cA_platforms")
             st.caption(f"✨ 預覽:成長數 = **{prev_cA_成長數} 篇** | 成長率 = **{prev_cA_率}**")
+            v_cA_聲量分析 = st.text_area(
+                "競品 A — 聲量特徵解析",
+                value=fd["cA_聲量分析"], height=110,
+                placeholder="例:本期聲量 174 則,正面討論集中在...負面聲量則由...引爆...",
+                key="mf_cA_聲量分析",
+            )
 
             st.markdown("**競品 B**")
             bb0, bb1, bb2 = st.columns(3)
@@ -487,6 +534,12 @@ def render_monthly_form(pdf_defaults: dict) -> Optional[dict]:
             with bb2: v_cB_後 = _num("專案後聲量(篇)", fd["cB_後"], "mf_cB_後")
             v_cB_platforms = st.text_input("主要聲量集中版面", value=fd["cB_platforms"], placeholder="Threads", key="mf_cB_platforms")
             st.caption(f"✨ 預覽:成長數 = **{prev_cB_成長數} 篇** | 成長率 = **{prev_cB_率}**")
+            v_cB_聲量分析 = st.text_area(
+                "競品 B — 聲量特徵解析",
+                value=fd["cB_聲量分析"], height=110,
+                placeholder="例:本期聲量 178 則,多數是...真正談複委託的比例偏低...",
+                key="mf_cB_聲量分析",
+            )
 
         # ----- 區塊 3:專案執行概況 - 議題操作方向 + 正負面討論 -----
         with st.expander("③ 專案執行概況", expanded=False):
@@ -581,6 +634,10 @@ def render_monthly_form(pdf_defaults: dict) -> Optional[dict]:
         fd["cB_前"] = int(v_cB_前 or 0)
         fd["cB_後"] = int(v_cB_後 or 0)
         fd["cB_platforms"] = v_cB_platforms
+        # 聲量特徵解析
+        fd["自品_聲量分析"] = v_自品_聲量分析
+        fd["cA_聲量分析"] = v_cA_聲量分析
+        fd["cB_聲量分析"] = v_cB_聲量分析
         fd["議題操作方向_text"] = v_議題操作方向
         fd["正面_1_標題"] = v_pos1_title
         fd["正面_1_bullets_text"] = v_pos1_bullets
@@ -636,6 +693,11 @@ def render_monthly_form(pdf_defaults: dict) -> Optional[dict]:
         "聲量_競品A成長數": cA_成長數, "聲量_競品A成長率": cA_率, "聲量_競品A集中版面": fd["cA_platforms"],
         "聲量_競品B名稱": fd["cB_name"], "聲量_競品B_前": fd["cB_前"], "聲量_競品B_後": fd["cB_後"],
         "聲量_競品B成長數": cB_成長數, "聲量_競品B成長率": cB_率, "聲量_競品B集中版面": fd["cB_platforms"],
+
+        # 聲量特徵解析(每品牌一段自由描述)
+        "聲量_自品_分析": fd["自品_聲量分析"],
+        "聲量_競品A_分析": fd["cA_聲量分析"],
+        "聲量_競品B_分析": fd["cB_聲量分析"],
 
         # 專案執行進度(從 PDF)
         "專案發文量_細項": pdf_defaults.get('專案發文量_細項', ''),
