@@ -432,32 +432,37 @@ def render_monthly_form(pdf_defaults: dict) -> Optional[dict]:
     import streamlit as st
 
     # ---------- 初始化 session_state 字典 ----------
+    today = date.today()
+    _DEFAULTS = {
+        "專案名稱": "",
+        "視覺風格": "",
+        "月報_start": today.replace(day=1),
+        "月報_end": today,
+        "聲量_資料來源": "opview",
+        # 聲量(自品 + 2 競品)
+        "自品_name": "", "自品_前": 0, "自品_後": 0, "自品_platforms": "",
+        "cA_name": "", "cA_前": 0, "cA_後": 0, "cA_platforms": "",
+        "cB_name": "", "cB_前": 0, "cB_後": 0, "cB_platforms": "",
+        # 各品牌聲量分析(正評/負評/整體,不含文字雲圖和文字雲分析)
+        "自品_正評_text": "", "自品_負評_text": "", "自品_整體分析": "",
+        "cA_正評_text": "", "cA_負評_text": "", "cA_整體分析": "",
+        "cB_正評_text": "", "cB_負評_text": "", "cB_整體分析": "",
+        # 文字區塊
+        "議題操作方向_text": "",
+        "正面_1_標題": "", "正面_1_bullets_text": "",
+        "正面_2_標題": "", "正面_2_bullets_text": "",
+        "負面_1_標題": "", "負面_1_bullets_text": "",
+        "負面_2_標題": "", "負面_2_bullets_text": "",
+        "熱門回應_text": "",
+        "操作觀察_text": "",
+        "下階段方向_text": "",
+    }
     if "monthly_form_data" not in st.session_state:
-        today = date.today()
-        st.session_state["monthly_form_data"] = {
-            "專案名稱": "",
-            "視覺風格": "",
-            "月報_start": today.replace(day=1),  # 預設本月月初
-            "月報_end": today,
-            "聲量_資料來源": "opview",
-            # 聲量(自品 + 2 競品)
-            "自品_name": "", "自品_前": 0, "自品_後": 0, "自品_platforms": "",
-            "cA_name": "", "cA_前": 0, "cA_後": 0, "cA_platforms": "",
-            "cB_name": "", "cB_前": 0, "cB_後": 0, "cB_platforms": "",
-            # 各品牌聲量分析(正評/負評/整體,不含文字雲圖和文字雲分析)
-            "自品_正評_text": "", "自品_負評_text": "", "自品_整體分析": "",
-            "cA_正評_text": "", "cA_負評_text": "", "cA_整體分析": "",
-            "cB_正評_text": "", "cB_負評_text": "", "cB_整體分析": "",
-            # 文字區塊
-            "議題操作方向_text": "",
-            "正面_1_標題": "", "正面_1_bullets_text": "",
-            "正面_2_標題": "", "正面_2_bullets_text": "",
-            "負面_1_標題": "", "負面_1_bullets_text": "",
-            "負面_2_標題": "", "負面_2_bullets_text": "",
-            "熱門回應_text": "",
-            "操作觀察_text": "",
-            "下階段方向_text": "",
-        }
+        st.session_state["monthly_form_data"] = dict(_DEFAULTS)
+    else:
+        # 補齊舊 session 缺少的新欄位(例如升級後多了各品牌聲量分析)
+        for k, v in _DEFAULTS.items():
+            st.session_state["monthly_form_data"].setdefault(k, v)
 
     fd = st.session_state["monthly_form_data"]
 

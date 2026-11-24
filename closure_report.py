@@ -974,32 +974,37 @@ def render_word_form(pdf_defaults: dict) -> Optional[dict]:
 
     # ===== 初始化自建 session_state 字典 =====
     # 這個 dict 在 st.form 之外保存,切換功能類型不會被清掉
+    today = date.today()
+    _DEFAULTS = {
+        "專案名稱": "", "視覺風格": "",
+        "走期_start": today - timedelta(days=60),
+        "走期_end": today,
+        "work_days": 0,
+        "目的_text": "a.XXXXX\nb.XXXXX",
+        "觀察_前_start": today - timedelta(days=150),
+        "觀察_前_end": today - timedelta(days=61),
+        "觀察_後_start": today - timedelta(days=60),
+        "觀察_後_end": today,
+        "自品_name": "", "自品_before": 0, "自品_during": 0, "自品_platforms": "",
+        "自品_cloud_bytes": None, "自品_cloud_text": "",
+        "自品_pos_text": "", "自品_neg_text": "", "自品_overall": "",
+        "cA_name": "", "cA_before": 0, "cA_during": 0, "cA_platforms": "",
+        "cA_cloud_bytes": None, "cA_cloud_text": "",
+        "cA_pos_text": "", "cA_neg_text": "", "cA_overall": "",
+        "cB_name": "", "cB_before": 0, "cB_during": 0, "cB_platforms": "",
+        "cB_cloud_bytes": None, "cB_cloud_text": "",
+        "cB_pos_text": "", "cB_neg_text": "", "cB_overall": "",
+        "專案_pos": "", "專案_neg": "",
+        "觀察": "", "建議": "",
+        "有_threads": False, "t_views": 0.0, "t_likes": 0, "t_comments": 0, "t_bytes": None,
+        "有_dcard": False, "d_rank": "", "d_likes": 0, "d_comments": 0, "d_views": "", "d_bytes": None,
+    }
     if "word_form_data" not in st.session_state:
-        today = date.today()
-        st.session_state["word_form_data"] = {
-            "專案名稱": "", "視覺風格": "",
-            "走期_start": today - timedelta(days=60),
-            "走期_end": today,
-            "work_days": 0,
-            "目的_text": "a.XXXXX\nb.XXXXX",
-            "觀察_前_start": today - timedelta(days=150),
-            "觀察_前_end": today - timedelta(days=61),
-            "觀察_後_start": today - timedelta(days=60),
-            "觀察_後_end": today,
-            "自品_name": "", "自品_before": 0, "自品_during": 0, "自品_platforms": "",
-            "自品_cloud_bytes": None, "自品_cloud_text": "",
-            "自品_pos_text": "", "自品_neg_text": "", "自品_overall": "",
-            "cA_name": "", "cA_before": 0, "cA_during": 0, "cA_platforms": "",
-            "cA_cloud_bytes": None, "cA_cloud_text": "",
-            "cA_pos_text": "", "cA_neg_text": "", "cA_overall": "",
-            "cB_name": "", "cB_before": 0, "cB_during": 0, "cB_platforms": "",
-            "cB_cloud_bytes": None, "cB_cloud_text": "",
-            "cB_pos_text": "", "cB_neg_text": "", "cB_overall": "",
-            "專案_pos": "", "專案_neg": "",
-            "觀察": "", "建議": "",
-            "有_threads": False, "t_views": 0.0, "t_likes": 0, "t_comments": 0, "t_bytes": None,
-            "有_dcard": False, "d_rank": "", "d_likes": 0, "d_comments": 0, "d_views": "", "d_bytes": None,
-        }
+        st.session_state["word_form_data"] = dict(_DEFAULTS)
+    else:
+        # 補齊舊 session 缺少的新欄位
+        for k, v in _DEFAULTS.items():
+            st.session_state["word_form_data"].setdefault(k, v)
 
     fd = st.session_state["word_form_data"]
 
